@@ -2,7 +2,7 @@ import sbtassembly.AssemblyPlugin.autoImport._
 import java.nio.file.{Files, Paths}
 
 ThisBuild / organization := "com.company"
-ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.1.1-SNAPSHOT"
 ThisBuild / scalaVersion := "2.12.19"
 
 val sparkVersion = "3.5.2"

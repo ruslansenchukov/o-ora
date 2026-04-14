@@ -219,6 +219,8 @@ Main classes:
   ensure assembly jar is on Spark classpath.
 - `IllegalAccessError` on Java 17/21 (`sun.nio.ch.DirectBuffer`):
   Spark needs JPMS flags (`--add-exports`/`--add-opens`). For tests this project already sets them in `build.sbt`.
+- `ORA-12705` during Oracle logon:
+  connector automatically retries connection once with temporary English/US JVM locale override.
 - Authentication or network errors:
   verify JDBC URL, user/password, listener/service name.
 - Partitioning errors:

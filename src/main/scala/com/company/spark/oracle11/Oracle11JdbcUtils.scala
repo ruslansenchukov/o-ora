@@ -1,9 +1,9 @@
 package com.company.spark.oracle11
 
 import java.math.{BigDecimal => JBigDecimal}
-import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, Timestamp, Types}
+import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, SQLException, Timestamp, Types}
 import java.time.{Instant, LocalDate, LocalDateTime, OffsetDateTime}
-import java.util.Properties
+import java.util.{Locale, Properties}
 
 import scala.util.Try
 
@@ -14,12 +14,66 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
 object Oracle11JdbcUtils {
+  private val localeRetryLock = new Object
 
   def openConnection(options: Oracle11Options): Connection = {
     val props = new Properties()
     props.setProperty("user", options.user)
     props.setProperty("password", options.password)
-    DriverManager.getConnection(options.url, props)
+    try {
+      DriverManager.getConnection(options.url, props)
+    } catch {
+      // Some Oracle setups fail logon with ORA-12705 unless JVM locale is English/US.
+      // We retry once with temporary locale override instead of requiring manual Spark JVM flags.
+      case first: SQLException if containsOra12705(first) =>
+        openConnectionWithEnglishLocaleRetry(options.url, props, first)
+    }
+  }
+
+  private def openConnectionWithEnglishLocaleRetry(
+      url: String,
+      props: Properties,
+      original: SQLException): Connection = {
+    localeRetryLock.synchronized {
+      val previousLocale = Locale.getDefault
+      val previousLanguage = System.getProperty("user.language")
+      val previousCountry = System.getProperty("user.country")
+
+      try {
+        Locale.setDefault(Locale.US)
+        System.setProperty("user.language", "en")
+        System.setProperty("user.country", "US")
+        DriverManager.getConnection(url, props)
+      } catch {
+        case retryErr: SQLException =>
+          retryErr.addSuppressed(original)
+          throw retryErr
+      } finally {
+        Locale.setDefault(previousLocale)
+        restoreSystemProperty("user.language", previousLanguage)
+        restoreSystemProperty("user.country", previousCountry)
+      }
+    }
+  }
+
+  private def restoreSystemProperty(name: String, value: String): Unit = {
+    if (value == null) {
+      System.clearProperty(name)
+    } else {
+      System.setProperty(name, value)
+    }
+  }
+
+  private def containsOra12705(error: Throwable): Boolean = {
+    var current = error
+    while (current != null) {
+      val message = Option(current.getMessage).getOrElse("")
+      if (message.contains("ORA-12705")) {
+        return true
+      }
+      current = current.getCause
+    }
+    false
   }
 
   def quoteIdentifier(name: String): String =
