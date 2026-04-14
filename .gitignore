@@ -1,0 +1,10 @@
+target/
+project/target/
+project/project/
+.metals/
+.bloop/
+.idea/
+.vscode/
+*.iml
+venv
+__pycache__
