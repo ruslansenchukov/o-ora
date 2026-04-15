@@ -13,7 +13,7 @@ sbt clean assembly
 Artifact:
 
 ```text
-target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar
+target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar
 ```
 
 ## Usage
@@ -48,7 +48,7 @@ df = (
 ```bash
 spark-submit \
   --master "local[2]" \
-  --jars target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar \
+  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar \
   examples/pyspark/read_oracle11_real.py \
   --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
   --dbtable "SCHEMA.TABLE_NAME" \
@@ -200,7 +200,7 @@ Example:
 ```bash
 spark-submit \
   --master "local[2]" \
-  --jars target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar \
+  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar \
   examples/pyspark/benchmark_oracle11.py \
   --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
   --dbtable "SCHEMA.BIG_TABLE" \
@@ -222,15 +222,23 @@ The script prints baseline vs tuned elapsed time and rows/sec deltas.
 ```bash
 spark-submit \
   --master "local[2]" \
-  --jars target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar \
+  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar \
   examples/pyspark/benchmark_oracle11_vs_jdbc.py \
   --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
   --dbtable "SCHEMA.BIG_TABLE" \
   --user "YOUR_USER" \
   --password "YOUR_PASSWORD" \
   --warmup 1 \
-  --runs 5
+  --runs 5 \
+  --run-order alternate
 ```
+
+Fair A/B recommendations:
+
+- keep `fetchsize` and partition settings identical between `oracle11` and `jdbc`
+- use the same projection/filter workload on both readers
+- use `--run-order alternate` to reduce cache/order bias
+- compare `avg`, `p90`, and `stddev` (not avg only)
 
 ## Troubleshooting
 

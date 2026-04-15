@@ -123,7 +123,7 @@ object Oracle11PartitionPlanner {
           if (lower == null || upper == null) {
             Array(Oracle11InputPartition(None))
           } else {
-            planNumeric(columnSql, BigDecimal(lower), BigDecimal(upper), effectivePartitions)
+            planNumeric(columnSql, BigDecimal(lower), BigDecimal(upper), effectivePartitions, field.dataType)
           }
 
         case DateType =>
@@ -181,7 +181,7 @@ object Oracle11PartitionPlanner {
       case dt if isNumeric(dt) =>
         val lower = parseBigDecimal(lowerBoundRaw, "lowerBound")
         val upper = parseBigDecimal(upperBoundRaw, "upperBound")
-        planNumeric(columnSql, lower, upper, numPartitions)
+        planNumeric(columnSql, lower, upper, numPartitions, field.dataType)
 
       case DateType =>
         val lower = Oracle11JdbcUtils.parseDateBound(lowerBoundRaw)
@@ -208,7 +208,8 @@ object Oracle11PartitionPlanner {
       columnSql: String,
       lower: BigDecimal,
       upper: BigDecimal,
-      numPartitions: Int): Array[Oracle11InputPartition] = {
+      numPartitions: Int,
+      numericType: DataType): Array[Oracle11InputPartition] = {
 
     val diff = upper - lower
     if (diff <= 0) {
@@ -221,8 +222,60 @@ object Oracle11PartitionPlanner {
       return Array(Oracle11InputPartition(None))
     }
 
-    val boundaries = (1 until numPartitions).map(i => (lower + stride * i).bigDecimal)
-    buildPartitions(columnSql, boundaries, DecimalType(38, 18))
+    val boundaryType = numericBoundaryType(numericType)
+    val boundaries = (1 until numPartitions).map { i =>
+      castNumericBoundary(lower + stride * i, boundaryType)
+    }
+    buildPartitions(columnSql, boundaries, boundaryType)
+  }
+
+  private def numericBoundaryType(dataType: DataType): DataType = dataType match {
+    case ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType => dataType
+    case d: DecimalType                                                           => d
+    case _                                                                        => DecimalType(38, 18)
+  }
+
+  private def castNumericBoundary(boundary: BigDecimal, dataType: DataType): Any = dataType match {
+    case ByteType =>
+      safeToByte(boundary.setScale(0, BigDecimal.RoundingMode.FLOOR).toBigInt)
+    case ShortType =>
+      safeToShort(boundary.setScale(0, BigDecimal.RoundingMode.FLOOR).toBigInt)
+    case IntegerType =>
+      safeToInt(boundary.setScale(0, BigDecimal.RoundingMode.FLOOR).toBigInt)
+    case LongType =>
+      safeToLong(boundary.setScale(0, BigDecimal.RoundingMode.FLOOR).toBigInt)
+    case FloatType =>
+      boundary.toFloat
+    case DoubleType =>
+      boundary.toDouble
+    case _: DecimalType =>
+      boundary.bigDecimal
+    case _ =>
+      boundary.bigDecimal
+  }
+
+  private def safeToByte(value: BigInt): Byte = {
+    if (value < BigInt(Byte.MinValue)) Byte.MinValue
+    else if (value > BigInt(Byte.MaxValue)) Byte.MaxValue
+    else value.toByte
+  }
+
+  private def safeToShort(value: BigInt): Short = {
+    if (value < BigInt(Short.MinValue)) Short.MinValue
+    else if (value > BigInt(Short.MaxValue)) Short.MaxValue
+    else value.toShort
+  }
+
+  private def safeToInt(value: BigInt): Int = {
+    if (value < BigInt(Int.MinValue)) Int.MinValue
+    else if (value > BigInt(Int.MaxValue)) Int.MaxValue
+    else value.toInt
+  }
+
+  private def safeToLong(value: BigInt): Long = {
+    if (value < BigInt(Long.MinValue)) Long.MinValue
+    else if (value > BigInt(Long.MaxValue)) Long.MaxValue
+    else value.toLong
   }
 
   private def planDate(

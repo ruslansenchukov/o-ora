@@ -42,7 +42,11 @@ final class Oracle11PartitionReader(
       connection = Oracle11JdbcUtils.openConnection(options)
       tuneConnection(connection)
 
-      statement = connection.prepareStatement(builtQuery.sql)
+      statement = connection.prepareStatement(
+        builtQuery.sql,
+        ResultSet.TYPE_FORWARD_ONLY,
+        ResultSet.CONCUR_READ_ONLY
+      )
       statement.setFetchSize(options.fetchSize)
       safely {
         statement.setFetchDirection(ResultSet.FETCH_FORWARD)
@@ -51,7 +55,7 @@ final class Oracle11PartitionReader(
 
       Oracle11JdbcUtils.bindParameters(statement, builtQuery.params)
       resultSet = statement.executeQuery()
-      rowExtractor = Oracle11JdbcUtils.buildInternalRowExtractor(requiredSchema)
+      rowExtractor = Oracle11JdbcUtils.buildReusableInternalRowExtractor(requiredSchema)
       initialized = true
     } catch {
       case t: Throwable =>

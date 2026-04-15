@@ -37,6 +37,26 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
     assert(partitions.head.predicate.exists(_.sql.contains("OR \"ID\" IS NULL")))
     assert(partitions(1).predicate.exists(_.sql.contains("\"ID\" >= ? AND \"ID\" < ?")))
     assert(partitions(2).predicate.exists(_.sql.contains("\"ID\" >= ?")))
+    assert(partitions.head.predicate.get.params.head.sparkType == IntegerType)
+    assert(partitions(1).predicate.get.params.forall(_.sparkType == IntegerType))
+  }
+
+  test("plan decimal range partitions keeps decimal bind type") {
+    val options = Oracle11Options.fromMap(
+      base ++ Map(
+        "partitionColumn" -> "AMOUNT",
+        "lowerBound" -> "0",
+        "upperBound" -> "1000",
+        "numPartitions" -> "4"
+      ))
+
+    val decimalType = DecimalType(12, 2)
+    val schema = StructType(Seq(StructField("AMOUNT", decimalType, nullable = true)))
+    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
+
+    assert(partitions.length == 4)
+    assert(partitions.head.predicate.get.params.head.sparkType == decimalType)
+    assert(partitions(1).predicate.get.params.forall(_.sparkType == decimalType))
   }
 
   test("plan timestamp range partitions") {

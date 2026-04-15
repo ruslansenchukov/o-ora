@@ -21,6 +21,7 @@ object Oracle11JdbcUtils {
     val props = new Properties()
     props.setProperty("user", options.user)
     props.setProperty("password", options.password)
+    props.setProperty("defaultRowPrefetch", options.fetchSize.toString)
     options.connectTimeoutMs.foreach(v => props.setProperty("oracle.net.CONNECT_TIMEOUT", v.toString))
     options.readTimeoutMs.foreach(v => props.setProperty("oracle.jdbc.ReadTimeout", v.toString))
 
@@ -145,7 +146,7 @@ object Oracle11JdbcUtils {
     if (schema.isEmpty) {
       (_: ResultSet) => InternalRow.empty
     } else {
-      val readers: Array[ColumnReader] = schema.fields.map(f => buildColumnReader(f.dataType)).toArray
+      val readers = buildReaders(schema)
       (resultSet: ResultSet) => {
         val values = new Array[Any](readers.length)
         var i = 0
@@ -158,8 +159,30 @@ object Oracle11JdbcUtils {
     }
   }
 
+  // Reuses the same row object between `next()` calls to reduce per-row allocations on scan hot path.
+  def buildReusableInternalRowExtractor(schema: StructType): ResultSet => InternalRow = {
+    if (schema.isEmpty) {
+      (_: ResultSet) => InternalRow.empty
+    } else {
+      val readers = buildReaders(schema)
+      val values = new Array[Any](readers.length)
+      val row = new GenericInternalRow(values)
+      (resultSet: ResultSet) => {
+        var i = 0
+        while (i < readers.length) {
+          values(i) = readers(i)(resultSet, i + 1)
+          i += 1
+        }
+        row
+      }
+    }
+  }
+
   def toInternalRow(resultSet: ResultSet, schema: StructType): InternalRow =
     buildInternalRowExtractor(schema)(resultSet)
+
+  private def buildReaders(schema: StructType): Array[ColumnReader] =
+    schema.fields.map(f => buildColumnReader(f.dataType)).toArray
 
   private def buildColumnReader(dataType: DataType): ColumnReader = dataType match {
     case IntegerType =>
@@ -219,11 +242,7 @@ object Oracle11JdbcUtils {
         if (v == null) {
           null
         } else {
-          try {
-            Decimal(v, t.precision, t.scale)
-          } catch {
-            case _: ArithmeticException => Decimal(v)
-          }
+          toSparkDecimal(v, t)
         }
       }
 
@@ -244,6 +263,29 @@ object Oracle11JdbcUtils {
         val v = rs.getObject(idx)
         if (v == null) null else UTF8String.fromString(v.toString)
       }
+  }
+
+  private[oracle11] def toSparkDecimal(value: JBigDecimal, targetType: DecimalType): Decimal = {
+    if (value == null) {
+      return null
+    }
+
+    // Fast path avoids exception-driven control flow for out-of-range values.
+    if (fitsInDecimalType(value, targetType)) {
+      try {
+        Decimal(value, targetType.precision, targetType.scale)
+      } catch {
+        case _: ArithmeticException => Decimal(value)
+      }
+    } else {
+      Decimal(value)
+    }
+  }
+
+  private def fitsInDecimalType(value: JBigDecimal, targetType: DecimalType): Boolean = {
+    val precision = value.precision()
+    val scale = value.scale()
+    precision <= targetType.precision && scale >= 0 && scale <= targetType.scale
   }
 
   def closeQuietly(resource: AutoCloseable): Unit = {

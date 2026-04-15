@@ -5,7 +5,7 @@ import os
 import statistics
 import sys
 import time
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import col
@@ -29,6 +29,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--app-name", default="oracle11-vs-jdbc-benchmark", help="Spark app name")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup runs per datasource")
     parser.add_argument("--runs", type=int, default=5, help="Measured runs per datasource")
+    parser.add_argument(
+        "--run-order",
+        choices=["alternate", "oracle11-first", "jdbc-first"],
+        default="alternate",
+        help="Execution order of measured runs (default: alternate)",
+    )
 
     parser.add_argument("--oracle11-fetchsize", type=int, default=5000, help="Fetch size for oracle11")
     parser.add_argument("--jdbc-fetchsize", type=int, default=5000, help="Fetch size for Spark JDBC")
@@ -164,26 +170,42 @@ def jdbc_dataframe(spark: SparkSession, args: argparse.Namespace, password: str)
     return reader.load()
 
 
-def run_benchmark(
+def run_sequence(order: str, run_index: int) -> List[str]:
+    if order == "oracle11-first":
+        return ["oracle11", "jdbc"]
+    if order == "jdbc-first":
+        return ["jdbc", "oracle11"]
+    if run_index % 2 == 0:
+        return ["oracle11", "jdbc"]
+    return ["jdbc", "oracle11"]
+
+
+def run_single_count(frame_builder, spark: SparkSession) -> Tuple[int, float]:
+    start = time.perf_counter()
+    row_count = frame_builder(spark).count()
+    elapsed = time.perf_counter() - start
+    return row_count, elapsed
+
+
+def execute_benchmark(
     spark: SparkSession,
-    label: str,
-    frame_builder,
-    warmup: int,
-    runs: int,
-) -> Tuple[int, List[float]]:
-    row_count = -1
-    durations: List[float] = []
+    args: argparse.Namespace,
+    builders: Dict[str, Callable[[SparkSession], DataFrame]],
+) -> Tuple[Dict[str, int], Dict[str, List[float]]]:
+    rows = {"oracle11": -1, "jdbc": -1}
+    durations = {"oracle11": [], "jdbc": []}
 
-    for _ in range(warmup):
-        row_count = frame_builder(spark).count()
+    for i in range(args.warmup):
+        for source in run_sequence(args.run_order, i):
+            rows[source], _ = run_single_count(builders[source], spark)
 
-    for _ in range(runs):
-        start = time.perf_counter()
-        row_count = frame_builder(spark).count()
-        durations.append(time.perf_counter() - start)
+    for i in range(args.runs):
+        for source in run_sequence(args.run_order, i):
+            row_count, elapsed = run_single_count(builders[source], spark)
+            rows[source] = row_count
+            durations[source].append(elapsed)
 
-    print(f"{label}: rows={row_count}, runs={runs}")
-    return row_count, durations
+    return rows, durations
 
 
 def summarize(name: str, row_count: int, durations: List[float]) -> Dict[str, float]:
@@ -192,6 +214,9 @@ def summarize(name: str, row_count: int, durations: List[float]) -> Dict[str, fl
     ordered = sorted(durations)
     p90_index = max(0, math.ceil(0.9 * len(ordered)) - 1)
     p90_sec = ordered[p90_index]
+    min_sec = ordered[0]
+    max_sec = ordered[-1]
+    stddev_sec = statistics.stdev(durations) if len(durations) > 1 else 0.0
     rows_per_sec = row_count / avg_sec if avg_sec > 0 else 0.0
 
     print(f"\n{name}")
@@ -200,8 +225,12 @@ def summarize(name: str, row_count: int, durations: List[float]) -> Dict[str, fl
     print(f"  avg_sec: {avg_sec:.4f}")
     print(f"  p50_sec: {p50_sec:.4f}")
     print(f"  p90_sec: {p90_sec:.4f}")
+    print(f"  min_sec: {min_sec:.4f}")
+    print(f"  max_sec: {max_sec:.4f}")
+    print(f"  stddev_sec: {stddev_sec:.4f}")
     print(f"  rows_per_sec: {rows_per_sec:.2f}")
     return {"avg_sec": avg_sec, "rows_per_sec": rows_per_sec}
+
 
 def apply_workload(df: DataFrame, args: argparse.Namespace) -> DataFrame:
     if args.select_cols:
@@ -255,23 +284,20 @@ def main() -> int:
     spark = create_spark_session(args)
 
     try:
-        oracle_rows, oracle_times = run_benchmark(
-            spark=spark,
-            label="oracle11",
-            frame_builder=lambda s: apply_workload(oracle11_dataframe(s, args, password), args),
-            warmup=args.warmup,
-            runs=args.runs,
+        builders = {
+            "oracle11": lambda s: apply_workload(oracle11_dataframe(s, args, password), args),
+            "jdbc": lambda s: apply_workload(jdbc_dataframe(s, args, password), args),
+        }
+        rows, timings = execute_benchmark(spark=spark, args=args, builders=builders)
+        print(
+            f"oracle11: rows={rows['oracle11']}, runs={len(timings['oracle11'])}, run_order={args.run_order}"
         )
-        jdbc_rows, jdbc_times = run_benchmark(
-            spark=spark,
-            label="jdbc",
-            frame_builder=lambda s: apply_workload(jdbc_dataframe(s, args, password), args),
-            warmup=args.warmup,
-            runs=args.runs,
+        print(
+            f"jdbc: rows={rows['jdbc']}, runs={len(timings['jdbc'])}, run_order={args.run_order}"
         )
 
-        oracle_stats = summarize("oracle11", oracle_rows, oracle_times)
-        jdbc_stats = summarize("jdbc", jdbc_rows, jdbc_times)
+        oracle_stats = summarize("oracle11", rows["oracle11"], timings["oracle11"])
+        jdbc_stats = summarize("jdbc", rows["jdbc"], timings["jdbc"])
 
         print("\nDelta (oracle11 vs jdbc)")
         avg_improvement = ((jdbc_stats["avg_sec"] - oracle_stats["avg_sec"]) / jdbc_stats["avg_sec"]) * 100.0
