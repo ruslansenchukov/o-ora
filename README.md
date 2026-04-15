@@ -217,11 +217,30 @@ spark-submit \
 
 The script prints baseline vs tuned elapsed time and rows/sec deltas.
 
+`oracle11` vs standard Spark JDBC benchmark:
+
+```bash
+spark-submit \
+  --master "local[2]" \
+  --jars target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar \
+  examples/pyspark/benchmark_oracle11_vs_jdbc.py \
+  --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
+  --dbtable "SCHEMA.BIG_TABLE" \
+  --user "YOUR_USER" \
+  --password "YOUR_PASSWORD" \
+  --warmup 1 \
+  --runs 5
+```
+
 ## Troubleshooting
 
 - `DATA_SOURCE_NOT_FOUND: oracle11`: verify assembly jar path in `--jars`
 - `zsh: no matches found: local[2]`: quote master as `"local[2]"`
 - `ORA-12705`: connector retries connection once with temporary `en_US` locale override
+- `ORA-12705` with standard Spark `format("jdbc")`: use
+  `--conf "spark.driver.extraJavaOptions=-Duser.language=en -Duser.country=US"` and
+  `--conf "spark.executor.extraJavaOptions=-Duser.language=en -Duser.country=US"`,
+  or run `examples/pyspark/benchmark_oracle11_vs_jdbc.py` (locale fix is enabled there by default)
 - `Connection refused`: verify host/port/service and firewall/security group
 - `NoClassDefFoundError` for Oracle JDBC classes: ensure assembly jar is loaded
 
@@ -231,3 +250,28 @@ The script prints baseline vs tuned elapsed time and rows/sec deltas.
 - aggregate pushdown is not implemented
 - advanced predicate pushdown (`Not`, `StartsWith`, etc.) is not implemented
 - no catalog integration yet
+
+
+## Benchmark results
+
+```bash
+oracle11
+  rows: 9981
+  runs: 111
+  avg_sec: 1.0270
+  p50_sec: 1.0158
+  p90_sec: 1.1031
+  rows_per_sec: 9718.97
+
+jdbc
+  rows: 9981
+  runs: 111
+  avg_sec: 1.7597
+  p50_sec: 1.7407
+  p90_sec: 1.8690
+  rows_per_sec: 5672.09
+
+Delta (oracle11 vs jdbc)
+  avg_sec improvement: 41.64%
+  rows_per_sec improvement: 71.35%
+  ```
