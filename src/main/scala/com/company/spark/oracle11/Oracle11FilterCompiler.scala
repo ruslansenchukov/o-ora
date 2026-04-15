@@ -15,7 +15,15 @@ final case class Oracle11FilterCompilationResult(
 object Oracle11FilterCompiler {
 
   // Filter compiler is isolated to keep SQL generation safe and centralized.
-  def compile(filters: Array[Filter], schema: StructType): Oracle11FilterCompilationResult = {
+  def compile(
+      filters: Array[Filter],
+      schema: StructType,
+      maxInListSize: Int = 1000): Oracle11FilterCompilationResult = {
+
+    if (maxInListSize <= 0) {
+      throw new IllegalArgumentException(s"maxInListSize must be > 0, got $maxInListSize")
+    }
+
     val safeFilters = Option(filters).getOrElse(Array.empty[Filter])
     val resolved = schema.fields.map(f => f.name.toLowerCase(Locale.ROOT) -> f).toMap
 
@@ -24,7 +32,7 @@ object Oracle11FilterCompiler {
     val unhandled = ArrayBuffer.empty[Filter]
 
     safeFilters.foreach { filter =>
-      compileSingle(filter, resolved) match {
+      compileSingle(filter, resolved, maxInListSize) match {
         case Some(compiled) =>
           handled += compiled
           pushed += filter
@@ -45,7 +53,8 @@ object Oracle11FilterCompiler {
 
   private def compileSingle(
       filter: Filter,
-      schemaIndex: Map[String, org.apache.spark.sql.types.StructField]): Option[Oracle11SqlPredicate] = {
+      schemaIndex: Map[String, org.apache.spark.sql.types.StructField],
+      maxInListSize: Int): Option[Oracle11SqlPredicate] = {
 
     def column(fieldName: String): Option[org.apache.spark.sql.types.StructField] =
       schemaIndex.get(fieldName.toLowerCase(Locale.ROOT))
@@ -88,17 +97,29 @@ object Oracle11FilterCompiler {
 
       case In(attribute, values) =>
         column(attribute).flatMap { field =>
+          val columnSql = Oracle11JdbcUtils.quoteIdentifier(field.name)
           val normalized = values.toSeq
             .filter(_ != null)
             .flatMap(v => Oracle11JdbcUtils.normalizeLiteral(v, field.dataType))
+
           if (normalized.isEmpty) {
             Some(Oracle11SqlPredicate("1 = 0", Nil))
           } else {
-            val placeholders = normalized.map(_ => "?").mkString(", ")
+            val groups = normalized.grouped(maxInListSize).toSeq
+            val groupSql = groups.map { group =>
+              val placeholders = group.map(_ => "?").mkString(", ")
+              s"$columnSql IN ($placeholders)"
+            }
+            val sql = if (groupSql.length == 1) {
+              groupSql.head
+            } else {
+              groupSql.map(s => s"($s)").mkString("(", " OR ", ")")
+            }
+
             Some(
               Oracle11SqlPredicate(
-                s"${Oracle11JdbcUtils.quoteIdentifier(field.name)} IN ($placeholders)",
-                normalized.map(v => JdbcParameter(v, field.dataType))
+                sql = sql,
+                params = normalized.map(v => JdbcParameter(v, field.dataType))
               ))
           }
         }
@@ -115,14 +136,14 @@ object Oracle11FilterCompiler {
 
       case And(left, right) =>
         for {
-          l <- compileSingle(left, schemaIndex)
-          r <- compileSingle(right, schemaIndex)
+          l <- compileSingle(left, schemaIndex, maxInListSize)
+          r <- compileSingle(right, schemaIndex, maxInListSize)
         } yield Oracle11SqlPredicate.and(l, r)
 
       case Or(left, right) =>
         for {
-          l <- compileSingle(left, schemaIndex)
-          r <- compileSingle(right, schemaIndex)
+          l <- compileSingle(left, schemaIndex, maxInListSize)
+          r <- compileSingle(right, schemaIndex, maxInListSize)
         } yield Oracle11SqlPredicate.or(l, r)
 
       case _ =>

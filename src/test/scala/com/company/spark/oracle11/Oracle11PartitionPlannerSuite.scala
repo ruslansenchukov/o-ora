@@ -16,7 +16,7 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
     val options = Oracle11Options.fromMap(base)
     val schema = StructType(Seq(StructField("ID", IntegerType, nullable = false)))
 
-    val partitions = Oracle11PartitionPlanner.plan(options, schema)
+    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
     assert(partitions.length == 1)
     assert(partitions.head.predicate.isEmpty)
   }
@@ -31,7 +31,7 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
       ))
 
     val schema = StructType(Seq(StructField("ID", IntegerType, nullable = true)))
-    val partitions = Oracle11PartitionPlanner.plan(options, schema)
+    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
 
     assert(partitions.length == 3)
     assert(partitions.head.predicate.exists(_.sql.contains("OR \"ID\" IS NULL")))
@@ -49,10 +49,27 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
       ))
 
     val schema = StructType(Seq(StructField("CREATED_AT", TimestampType, nullable = true)))
-    val partitions = Oracle11PartitionPlanner.plan(options, schema)
+    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
 
     assert(partitions.length == 3)
     assert(partitions.forall(_.predicate.nonEmpty))
+    assert(partitions.head.predicate.get.params.head.sparkType == TimestampType)
+  }
+
+  test("plan date range partitions with DateType boundaries") {
+    val options = Oracle11Options.fromMap(
+      base ++ Map(
+        "partitionColumn" -> "DT",
+        "lowerBound" -> "2020-01-01",
+        "upperBound" -> "2020-01-04",
+        "numPartitions" -> "3"
+      ))
+
+    val schema = StructType(Seq(StructField("DT", DateType, nullable = true)))
+    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
+
+    assert(partitions.length == 3)
+    assert(partitions.head.predicate.get.params.head.sparkType == DateType)
   }
 
   test("fail on unknown partition column") {
@@ -66,8 +83,34 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
 
     val schema = StructType(Seq(StructField("ID", IntegerType, nullable = true)))
     val err = intercept[IllegalArgumentException] {
-      Oracle11PartitionPlanner.plan(options, schema)
+      Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
     }
     assert(err.getMessage.contains("was not found"))
+  }
+
+  test("auto bounds falls back to single partition when stats query fails") {
+    val options = Oracle11Options.fromMap(
+      Map(
+        "url" -> "jdbc:oracle:thin:@//127.0.0.1:1/XE",
+        "user" -> "u",
+        "password" -> "p",
+        "dbtable" -> "HR.EMPLOYEES",
+        "partitionColumn" -> "ID",
+        "numPartitions" -> "8",
+        "autoPartitionBounds" -> "true",
+        "connectTimeoutMs" -> "200"
+      ))
+
+    val schema = StructType(Seq(StructField("ID", IntegerType, nullable = true)))
+    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
+
+    assert(partitions.length == 1)
+    assert(partitions.head.predicate.isEmpty)
+  }
+
+  test("auto bounds computes effective partition count from row threshold") {
+    assert(Oracle11PartitionPlanner.computeEffectivePartitions(8, rowCount = 1000000L, minRowsPerPartition = 200000L) == 5)
+    assert(Oracle11PartitionPlanner.computeEffectivePartitions(8, rowCount = 10000L, minRowsPerPartition = 200000L) == 1)
+    assert(Oracle11PartitionPlanner.computeEffectivePartitions(1, rowCount = 1000000L, minRowsPerPartition = 1L) == 1)
   }
 }

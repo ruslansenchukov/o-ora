@@ -1,15 +1,23 @@
 package com.company.spark.oracle11
 
 import java.math.MathContext
-import java.sql.Timestamp
-import java.time.ZoneOffset
+import java.sql.{Date, Timestamp}
+import java.util.logging.Logger
+
+import scala.util.control.NonFatal
 
 import org.apache.spark.sql.types._
 
 object Oracle11PartitionPlanner {
+  private val logger = Logger.getLogger(getClass.getName)
 
   // Partition planning mirrors Spark JDBC semantics: bounds define stride, not hard clipping.
-  def plan(options: Oracle11Options, schema: StructType): Array[Oracle11InputPartition] = {
+  def plan(
+      options: Oracle11Options,
+      relation: Oracle11Relation,
+      schema: StructType,
+      pushedPredicate: Option[Oracle11SqlPredicate]): Array[Oracle11InputPartition] = {
+
     options.partitioning match {
       case None =>
         Array(Oracle11InputPartition(None))
@@ -23,24 +31,171 @@ object Oracle11PartitionPlanner {
               s"Partition column '${partitioning.partitionColumn}' was not found in schema. Available: [$available]")
           }
 
-        val columnSql = Oracle11JdbcUtils.quoteIdentifier(field.name)
-        val numPartitions = partitioning.numPartitions
-        if (numPartitions <= 1) {
+        if (partitioning.numPartitions <= 1) {
           return Array(Oracle11InputPartition(None))
         }
 
-        field.dataType match {
-          case dt if isNumeric(dt) =>
-            planNumeric(columnSql, partitioning.lowerBound, partitioning.upperBound, numPartitions)
+        val columnSql = Oracle11JdbcUtils.quoteIdentifier(field.name)
 
-          case DateType | TimestampType =>
-            planTemporal(columnSql, partitioning.lowerBound, partitioning.upperBound, numPartitions)
-
-          case other =>
-            throw new IllegalArgumentException(
-              s"Partition column '${field.name}' has unsupported type '$other'. " +
-                "Only numeric/date/timestamp are supported")
+        if (partitioning.autoBounds) {
+          try {
+            planWithAutoBounds(
+              options = options,
+              relation = relation,
+              field = field,
+              columnSql = columnSql,
+              requestedPartitions = partitioning.numPartitions,
+              pushedPredicate = pushedPredicate
+            )
+          } catch {
+            case NonFatal(err) =>
+              logger.warning(
+                s"Auto partition bounds failed for column '${field.name}'. Falling back to single partition. ${err.getMessage}")
+              Array(Oracle11InputPartition(None))
+          }
+        } else {
+          (partitioning.lowerBound, partitioning.upperBound) match {
+            case (Some(lower), Some(upper)) =>
+              planWithBounds(
+                field = field,
+                columnSql = columnSql,
+                lowerBoundRaw = lower,
+                upperBoundRaw = upper,
+                numPartitions = partitioning.numPartitions
+              )
+            case _ =>
+              throw new IllegalArgumentException(
+                "Manual partitioning requires both lowerBound and upperBound")
+          }
         }
+    }
+  }
+
+  private def planWithAutoBounds(
+      options: Oracle11Options,
+      relation: Oracle11Relation,
+      field: StructField,
+      columnSql: String,
+      requestedPartitions: Int,
+      pushedPredicate: Option[Oracle11SqlPredicate]): Array[Oracle11InputPartition] = {
+
+    val statsSql = {
+      val where = pushedPredicate.map(p => s" WHERE (${p.sql})").getOrElse("")
+      s"SELECT MIN($columnSql), MAX($columnSql), COUNT(1) FROM ${relation.fromClause}$where"
+    }
+
+    val conn = Oracle11JdbcUtils.openConnection(options)
+    var stmt: java.sql.PreparedStatement = null
+    var rs: java.sql.ResultSet = null
+
+    try {
+      safely {
+        conn.setReadOnly(true)
+      }
+      safely {
+        conn.setAutoCommit(false)
+      }
+
+      stmt = conn.prepareStatement(statsSql)
+      options.queryTimeoutSec.foreach(stmt.setQueryTimeout)
+      pushedPredicate.foreach(p => Oracle11JdbcUtils.bindParameters(stmt, p.params))
+      rs = stmt.executeQuery()
+
+      if (!rs.next()) {
+        return Array(Oracle11InputPartition(None))
+      }
+
+      val count = rs.getLong(3)
+      val effectivePartitions = computeEffectivePartitions(
+        requested = requestedPartitions,
+        rowCount = count,
+        minRowsPerPartition = options.autoPartitionMinRowsPerPartition
+      )
+
+      if (effectivePartitions <= 1) {
+        return Array(Oracle11InputPartition(None))
+      }
+
+      field.dataType match {
+        case dt if isNumeric(dt) =>
+          val lower = rs.getBigDecimal(1)
+          val upper = rs.getBigDecimal(2)
+          if (lower == null || upper == null) {
+            Array(Oracle11InputPartition(None))
+          } else {
+            planNumeric(columnSql, BigDecimal(lower), BigDecimal(upper), effectivePartitions)
+          }
+
+        case DateType =>
+          val lower = rs.getDate(1)
+          val upper = rs.getDate(2)
+          if (lower == null || upper == null) {
+            Array(Oracle11InputPartition(None))
+          } else {
+            planDate(columnSql, lower, upper, effectivePartitions)
+          }
+
+        case TimestampType =>
+          val lower = rs.getTimestamp(1)
+          val upper = rs.getTimestamp(2)
+          if (lower == null || upper == null) {
+            Array(Oracle11InputPartition(None))
+          } else {
+            planTimestamp(columnSql, lower, upper, effectivePartitions)
+          }
+
+        case other =>
+          throw new IllegalArgumentException(
+            s"Partition column '${field.name}' has unsupported type '$other'. Only numeric/date/timestamp are supported")
+      }
+    } finally {
+      Oracle11JdbcUtils.closeQuietly(rs)
+      Oracle11JdbcUtils.closeQuietly(stmt)
+      Oracle11JdbcUtils.closeQuietly(conn)
+    }
+  }
+
+  private[oracle11] def computeEffectivePartitions(
+      requested: Int,
+      rowCount: Long,
+      minRowsPerPartition: Long): Int = {
+    val rowBased =
+      if (rowCount <= 0L) {
+        1
+      } else {
+        val n = math.ceil(rowCount.toDouble / minRowsPerPartition.toDouble).toInt
+        math.max(1, n)
+      }
+
+    math.max(1, math.min(requested, rowBased))
+  }
+
+  private def planWithBounds(
+      field: StructField,
+      columnSql: String,
+      lowerBoundRaw: String,
+      upperBoundRaw: String,
+      numPartitions: Int): Array[Oracle11InputPartition] = {
+
+    field.dataType match {
+      case dt if isNumeric(dt) =>
+        val lower = parseBigDecimal(lowerBoundRaw, "lowerBound")
+        val upper = parseBigDecimal(upperBoundRaw, "upperBound")
+        planNumeric(columnSql, lower, upper, numPartitions)
+
+      case DateType =>
+        val lower = Oracle11JdbcUtils.parseDateBound(lowerBoundRaw)
+        val upper = Oracle11JdbcUtils.parseDateBound(upperBoundRaw)
+        planDate(columnSql, lower, upper, numPartitions)
+
+      case TimestampType =>
+        val lower = Oracle11JdbcUtils.parseTimestampBound(lowerBoundRaw)
+        val upper = Oracle11JdbcUtils.parseTimestampBound(upperBoundRaw)
+        planTimestamp(columnSql, lower, upper, numPartitions)
+
+      case other =>
+        throw new IllegalArgumentException(
+          s"Partition column '${field.name}' has unsupported type '$other'. Only numeric/date/timestamp are supported")
     }
   }
 
@@ -51,12 +206,9 @@ object Oracle11PartitionPlanner {
 
   private def planNumeric(
       columnSql: String,
-      lowerBoundRaw: String,
-      upperBoundRaw: String,
+      lower: BigDecimal,
+      upper: BigDecimal,
       numPartitions: Int): Array[Oracle11InputPartition] = {
-
-    val lower = parseBigDecimal(lowerBoundRaw, "lowerBound")
-    val upper = parseBigDecimal(upperBoundRaw, "upperBound")
 
     val diff = upper - lower
     if (diff <= 0) {
@@ -69,21 +221,44 @@ object Oracle11PartitionPlanner {
       return Array(Oracle11InputPartition(None))
     }
 
-    val boundaries = (1 until numPartitions).map(i => lower + stride * i)
-    buildPartitions(columnSql, boundaries.map(_.bigDecimal), DecimalType(38, 18))
+    val boundaries = (1 until numPartitions).map(i => (lower + stride * i).bigDecimal)
+    buildPartitions(columnSql, boundaries, DecimalType(38, 18))
   }
 
-  private def planTemporal(
+  private def planDate(
       columnSql: String,
-      lowerBoundRaw: String,
-      upperBoundRaw: String,
+      lower: Date,
+      upper: Date,
       numPartitions: Int): Array[Oracle11InputPartition] = {
 
-    val lowerTs = Oracle11JdbcUtils.parseTimestampBound(lowerBoundRaw)
-    val upperTs = Oracle11JdbcUtils.parseTimestampBound(upperBoundRaw)
+    val lowerMs = lower.getTime
+    val upperMs = upper.getTime
+    val diff = upperMs - lowerMs
 
-    val lowerMs = lowerTs.toInstant.atZone(ZoneOffset.UTC).toInstant.toEpochMilli
-    val upperMs = upperTs.toInstant.atZone(ZoneOffset.UTC).toInstant.toEpochMilli
+    if (diff <= 0L) {
+      return Array(Oracle11InputPartition(None))
+    }
+
+    val stride = diff / numPartitions
+    if (stride <= 0L) {
+      return Array(Oracle11InputPartition(None))
+    }
+
+    val boundaries = (1 until numPartitions).map { i =>
+      new Date(lowerMs + stride * i)
+    }
+
+    buildPartitions(columnSql, boundaries, DateType)
+  }
+
+  private def planTimestamp(
+      columnSql: String,
+      lower: Timestamp,
+      upper: Timestamp,
+      numPartitions: Int): Array[Oracle11InputPartition] = {
+
+    val lowerMs = lower.getTime
+    val upperMs = upper.getTime
     val diff = upperMs - lowerMs
 
     if (diff <= 0L) {
@@ -143,6 +318,14 @@ object Oracle11PartitionPlanner {
     } catch {
       case _: NumberFormatException =>
         throw new IllegalArgumentException(s"Option '$optionName' must be numeric, got '$raw'")
+    }
+  }
+
+  private def safely(op: => Unit): Unit = {
+    try {
+      op
+    } catch {
+      case NonFatal(_) =>
     }
   }
 }

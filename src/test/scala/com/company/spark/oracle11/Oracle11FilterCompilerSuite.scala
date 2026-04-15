@@ -55,4 +55,22 @@ final class Oracle11FilterCompilerSuite extends AnyFunSuite {
     assert(result.unhandled.isEmpty)
     assert(result.predicate.exists(_.sql.contains("1 = 0")))
   }
+
+  test("IN filter is chunked when values exceed Oracle limit") {
+    val values = (1 to 12).map(Int.box).toArray[Any]
+    val result = Oracle11FilterCompiler.compile(Array(In("ID", values)), schema, maxInListSize = 5)
+
+    assert(result.unhandled.isEmpty)
+    val predicate = result.predicate.get
+    assert(predicate.sql.contains(" OR "))
+    assert(predicate.params.length == 12)
+    assert(predicate.sql.contains("\"ID\" IN"))
+  }
+
+  test("reject non-positive maxInListSize") {
+    val error = intercept[IllegalArgumentException] {
+      Oracle11FilterCompiler.compile(Array(In("ID", Array(1, 2))), schema, maxInListSize = 0)
+    }
+    assert(error.getMessage.contains("maxInListSize"))
+  }
 }

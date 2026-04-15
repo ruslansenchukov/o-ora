@@ -7,17 +7,21 @@ final class Oracle11Batch(
     options: Oracle11Options,
     fullSchema: StructType,
     requiredSchema: StructType,
-    pushedPredicate: Option[Oracle11SqlPredicate])
+    pushedPredicate: Option[Oracle11SqlPredicate],
+    pushedLimit: Option[Int])
     extends Batch {
 
   override def planInputPartitions(): Array[InputPartition] =
-    Oracle11PartitionPlanner.plan(options, fullSchema).map(identity[InputPartition])
+    Oracle11PartitionPlanner
+      .plan(options, options.relation, fullSchema, pushedPredicate)
+      .map(identity[InputPartition])
 
   override def createReaderFactory(): PartitionReaderFactory =
     new Oracle11PartitionReaderFactory(
       options = options,
       relation = options.relation,
       requiredSchema = requiredSchema,
-      pushedPredicate = pushedPredicate
+      pushedPredicate = pushedPredicate,
+      pushedLimit = pushedLimit
     )
 }

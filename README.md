@@ -1,19 +1,8 @@
 # spark-oracle11
 
-`spark-oracle11` is a custom Spark DataSource V2 connector for reading Oracle Database data through the JDBC Thin driver only.
+`spark-oracle11` is a Spark DataSource V2 connector for Oracle via JDBC Thin only.
 
-It is designed for Spark 3.5.x and Scala 2.12, with no dependency on Oracle Instant Client, OCI, `tnsnames.ora`, SQL*Plus, or any native Oracle libraries.
-
-## Why no Instant Client is required
-
-The connector uses only Oracle JDBC Thin (`ojdbc8`) which is a pure Java driver. All communication goes through JDBC over TCP.
-
-## Supported versions
-
-- Spark: `3.5.x`
-- Scala: `2.12.x`
-- Java: `11+`
-- Oracle DB target: Oracle 11g compatibility mode via JDBC Thin
+It targets Spark `3.5.x`, Scala `2.12`, Java `11+`, and does not require Oracle Instant Client, OCI, `tnsnames.ora`, SQL*Plus, or native libraries.
 
 ## Build
 
@@ -21,10 +10,10 @@ The connector uses only Oracle JDBC Thin (`ojdbc8`) which is a pure Java driver.
 sbt clean assembly
 ```
 
-Resulting fat jar:
+Artifact:
 
 ```text
-target/scala-2.12/spark-oracle11-0.1.0-SNAPSHOT-assembly.jar
+target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar
 ```
 
 ## Usage
@@ -54,29 +43,12 @@ df = (
 )
 ```
 
-### spark-shell
-
-```bash
-spark-shell \
-  --conf "spark.driver.extraJavaOptions=--add-exports=java.base/sun.nio.ch=ALL-UNNAMED" \
-  --jars target/scala-2.12/spark-oracle11-0.1.0-SNAPSHOT-assembly.jar
-```
-
-### spark-submit
+### spark-submit (PySpark example)
 
 ```bash
 spark-submit \
-  --class your.main.Class \
-  --jars target/scala-2.12/spark-oracle11-0.1.0-SNAPSHOT-assembly.jar \
-  your-app.jar
-```
-
-### PySpark real DB smoke-test
-
-```bash
-spark-submit \
-  --master local[2] \
-  --jars target/scala-2.12/spark-oracle11-0.1.0-SNAPSHOT-assembly.jar \
+  --master "local[2]" \
+  --jars target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar \
   examples/pyspark/read_oracle11_real.py \
   --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
   --dbtable "SCHEMA.TABLE_NAME" \
@@ -94,41 +66,51 @@ Required:
 - `url`
 - `user`
 - `password`
-- exactly one of: `dbtable` or `query`
+- exactly one of `dbtable` / `query`
 
-Optional:
+Core optional:
 
-- `fetchsize` (default: `1000`)
+- `fetchsize` (default `1000`)
+- `connectTimeoutMs` (no default, disabled if absent)
+- `readTimeoutMs` (no default, disabled if absent)
+- `queryTimeoutSec` (no default, disabled if absent)
+- `maxInListSize` (default `1000`)
+- `schemaCacheTtlSec` (default `300`, disable cache with `<= 0`)
+
+Partitioning options:
+
 - `partitionColumn`
+- `numPartitions`
 - `lowerBound`
 - `upperBound`
-- `numPartitions`
+- `autoPartitionBounds` (default `false`)
+- `autoPartitionMinRowsPerPartition` (default `100000`)
 
-Rules:
+Contracts:
 
-- `dbtable` XOR `query`.
-- Partition options must be provided as a full set.
-- If `query` is used with partition options, `partitionColumn` must exist in query output schema.
+- `dbtable` XOR `query`
+- manual partitioning requires full set: `partitionColumn + lowerBound + upperBound + numPartitions`
+- auto bounds requires: `autoPartitionBounds=true + partitionColumn + numPartitions`
+- with auto bounds, `lowerBound/upperBound` must be absent
+- for query mode + partitioning, `partitionColumn` must exist in query output
 
 ## Oracle type mapping
 
-- `VARCHAR2`, `CHAR`, `NCHAR`, `NVARCHAR2` -> `StringType`
-- `NUMBER(p,s)` -> typed numeric policy:
-  - `s = 0`: `IntegerType` / `LongType` / `DecimalType`
-  - `s > 0`: `DecimalType` where valid, otherwise `DoubleType`
-  - `s < 0`: integer-scale `DecimalType` where valid, otherwise `DoubleType`
+- `VARCHAR2`, `VARCHAR`, `CHAR`, `NCHAR`, `NVARCHAR2` -> `StringType`
+- `NUMBER(p,s)`:
+- `s = 0`: `IntegerType` (`p 1..9`), `LongType` (`p 10..18`), `DecimalType(p,0)` (`p 19..38`), else `DecimalType(38,0)`
+- `s > 0`: `DecimalType(p,s)` when valid, else `DoubleType`
+- `s < 0`: integer-scale `DecimalType` when valid, else `DoubleType`
 - `FLOAT` -> `DoubleType`
 - `DATE`, `TIMESTAMP` -> `TimestampType`
-- `CLOB` -> `StringType`
-- `BLOB`, `RAW` -> `BinaryType`
+- `CLOB`/`NCLOB` -> `StringType`
+- `BLOB`, `RAW`, `LONG RAW` -> `BinaryType`
 
-Nullability is inferred from JDBC metadata.
-
-## Pushdown support (v1)
+## Pushdown
 
 Column pruning:
 
-- Projection pushdown is supported.
+- supported
 
 Filter pushdown:
 
@@ -143,45 +125,62 @@ Filter pushdown:
 - `And`
 - `Or`
 
-Unsupported filters are returned to Spark as unhandled.
+`In` enhancement:
+
+- large `IN` is chunked into OR-groups based on `maxInListSize` to avoid Oracle `ORA-01795`
+
+Limit pushdown:
+
+- supported via `ROWNUM <= ?`
+- for multi-partition reads it is marked as partially pushed so Spark still applies the global limit safely
 
 Safety:
 
-- Predicates are compiled into SQL with bind placeholders (`?`) and typed parameter binding.
-- Literal user values are not concatenated as raw SQL.
+- SQL uses placeholders and typed bind parameters
+- unsupported filters are returned as unhandled to Spark
 
 ## Partitioning
 
-Range partitioning is supported for numeric/date/timestamp partition columns.
+Manual bounds:
 
-Generated predicates are gap-free:
-
+- same semantics as Spark JDBC: bounds define stride, not hard clipping
+- generated predicates are gap-free:
 - first: `(col < b1 OR col IS NULL)`
 - middle: `(col >= bi AND col < b{i+1})`
 - last: `(col >= b{n-1})`
 
-Semantics match Spark JDBC strategy where bounds define stride and do not hard-clip out-of-range rows.
+Auto bounds:
+
+- when enabled, connector runs `MIN/MAX/COUNT` over partition column (with already pushed predicates)
+- effective partition count is capped by both `numPartitions` and `autoPartitionMinRowsPerPartition`
+- if stats query fails, connector logs warning and falls back to single partition (no job failure)
+
+Temporal binding:
+
+- Date partitions bind `java.sql.Date`
+- Timestamp partitions bind `java.sql.Timestamp`
+
+## Schema inference cache
+
+- Per-JVM in-memory TTL cache keyed by `url + user + relation signature`
+- controlled by `schemaCacheTtlSec`
+- failed inference attempts are not cached
 
 ## Tests
 
-### Unit tests
+Unit tests:
 
 ```bash
 sbt test
 ```
 
-### Integration tests (Oracle)
-
-Integration tests are opt-in:
+Integration tests:
 
 ```bash
 sbt -Doracle11.it.enabled=true "IntegrationTest / test"
 ```
 
-By default harness tries Testcontainers Oracle XE (`gvenzl/oracle-xe:21-slim`).
-On Colima, this project auto-sets `TESTCONTAINERS_RYUK_DISABLED=true` for `IntegrationTest` forks to avoid known socket-mount issues with Ryuk.
-
-You can point tests to an external Oracle instance instead:
+External Oracle target:
 
 ```bash
 export ORA11_IT_URL='jdbc:oracle:thin:@//host:1521/SERVICE'
@@ -190,48 +189,45 @@ export ORA11_IT_PASSWORD='password'
 sbt -Doracle11.it.enabled=true "IntegrationTest / test"
 ```
 
-## Architecture overview
+## Benchmark harness
 
-Main classes:
+Script:
 
-- `Oracle11DataSource`: DataSource V2 entrypoint (`shortName = oracle11`)
-- `Oracle11Table`: table abstraction with read capability
-- `Oracle11ScanBuilder`: required columns + filter pushdown planning
-- `Oracle11Scan`, `Oracle11Batch`: batch read plan construction
-- `Oracle11InputPartition`, `Oracle11PartitionReaderFactory`, `Oracle11PartitionReader`: partition-level execution
-- `Oracle11Options`: option parsing and validation
-- `Oracle11SchemaInference`, `Oracle11TypeMapper`: schema and type handling
-- `Oracle11FilterCompiler`: safe filter-to-SQL translation
-- `Oracle11PartitionPlanner`: range partition generation
-- `Oracle11QueryBuilder`, `Oracle11JdbcUtils`: SQL assembly and JDBC utilities
+- `examples/pyspark/benchmark_oracle11.py`
 
-## Known limitations (v1)
+Example:
 
-- Read-only connector (no write path).
-- Limit pushdown is not enabled by default (extension point exists).
-- Filter coverage is limited to basic predicates listed above.
-- `dbtable`/`query` are treated as trusted SQL fragments (identifiers within generated predicates/projections are quoted safely).
-- Integration tests use Oracle XE container for convenience, not strict Oracle 11g binaries.
+```bash
+spark-submit \
+  --master "local[2]" \
+  --jars target/scala-2.12/spark-oracle11-0.1.1-SNAPSHOT-assembly.jar \
+  examples/pyspark/benchmark_oracle11.py \
+  --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
+  --dbtable "SCHEMA.BIG_TABLE" \
+  --user "YOUR_USER" \
+  --password "YOUR_PASSWORD" \
+  --warmup 1 \
+  --runs 5 \
+  --baseline-fetchsize 1000 \
+  --tuned-fetchsize 10000 \
+  --partition-column ID \
+  --num-partitions 16 \
+  --auto-partition-bounds
+```
+
+The script prints baseline vs tuned elapsed time and rows/sec deltas.
 
 ## Troubleshooting
 
-- `NoClassDefFoundError` for Oracle classes:
-  ensure assembly jar is on Spark classpath.
-- `IllegalAccessError` on Java 17/21 (`sun.nio.ch.DirectBuffer`):
-  Spark needs JPMS flags (`--add-exports`/`--add-opens`). For tests this project already sets them in `build.sbt`.
-- `ORA-12705` during Oracle logon:
-  connector automatically retries connection once with temporary English/US JVM locale override.
-- Authentication or network errors:
-  verify JDBC URL, user/password, listener/service name.
-- Partitioning errors:
-  check `partitionColumn` exists in inferred schema and bounds are valid for its type.
-- Filters not pushed down:
-  unsupported predicates are expected to be evaluated by Spark.
+- `DATA_SOURCE_NOT_FOUND: oracle11`: verify assembly jar path in `--jars`
+- `zsh: no matches found: local[2]`: quote master as `"local[2]"`
+- `ORA-12705`: connector retries connection once with temporary `en_US` locale override
+- `Connection refused`: verify host/port/service and firewall/security group
+- `NoClassDefFoundError` for Oracle JDBC classes: ensure assembly jar is loaded
 
-## Suggested next improvements
+## Known limitations
 
-- Implement `SupportsPushDownLimit` and top-N pushdown.
-- Add broader predicate compiler support (`Not`, `StartsWith`, etc.).
-- Add aggregate pushdown.
-- Add write path.
-- Add catalog integration.
+- read-only connector (no write path)
+- aggregate pushdown is not implemented
+- advanced predicate pushdown (`Not`, `StartsWith`, etc.) is not implemented
+- no catalog integration yet

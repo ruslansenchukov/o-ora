@@ -8,7 +8,8 @@ final class Oracle11PartitionReaderFactory(
     options: Oracle11Options,
     relation: Oracle11Relation,
     requiredSchema: StructType,
-    pushedPredicate: Option[Oracle11SqlPredicate])
+    pushedPredicate: Option[Oracle11SqlPredicate],
+    pushedLimit: Option[Int])
     extends PartitionReaderFactory {
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
@@ -24,7 +25,8 @@ final class Oracle11PartitionReaderFactory(
       relation = relation,
       requiredSchema = requiredSchema,
       partitionPredicate = typedPartition.predicate,
-      pushedPredicate = pushedPredicate
+      pushedPredicate = pushedPredicate,
+      pushedLimit = pushedLimit
     )
   }
 }

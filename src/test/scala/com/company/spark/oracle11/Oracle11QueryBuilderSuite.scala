@@ -47,4 +47,38 @@ final class Oracle11QueryBuilderSuite extends AnyFunSuite {
 
     assert(built.sql.startsWith("SELECT 1 FROM HR.EMPLOYEES"))
   }
+
+  test("build SELECT with limit uses placeholder") {
+    val schema = StructType(Seq(StructField("ID", IntegerType)))
+
+    val built = Oracle11QueryBuilder.buildSelect(
+      relation = Oracle11TableRelation("HR.EMPLOYEES"),
+      requiredSchema = schema,
+      partitionPredicate = None,
+      pushedPredicate = None,
+      limit = Some(25)
+    )
+
+    assert(built.sql.contains("ROWNUM <= ?"))
+    assert(built.params.nonEmpty)
+    assert(built.params.last.sparkType == IntegerType)
+    assert(built.params.last.value == 25)
+  }
+
+  test("build SELECT keeps predicate params before limit param") {
+    val schema = StructType(Seq(StructField("ID", IntegerType)))
+    val pushed = Oracle11SqlPredicate("\"ID\" >= ?", Seq(JdbcParameter(10, IntegerType)))
+
+    val built = Oracle11QueryBuilder.buildSelect(
+      relation = Oracle11TableRelation("HR.EMPLOYEES"),
+      requiredSchema = schema,
+      partitionPredicate = None,
+      pushedPredicate = Some(pushed),
+      limit = Some(2)
+    )
+
+    assert(built.params.length == 2)
+    assert(built.params.head.value == 10)
+    assert(built.params.last.value == 2)
+  }
 }

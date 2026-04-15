@@ -1,6 +1,8 @@
 package com.company.spark.oracle11
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
+import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.{BinaryType, IntegerType, StringType, TimestampType}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
@@ -110,5 +112,78 @@ final class Oracle11IntegrationSuite extends AnyFunSuite with BeforeAndAfterAll 
     assert(df.schema("ID").dataType == IntegerType)
     assert(df.schema("NAME").dataType == StringType)
     assert(df.count() == 3)
+  }
+
+  test("limit pushdown preserves result and appears in plan") {
+    val it = requireTarget()
+
+    val df = spark.read
+      .format("oracle11")
+      .option("url", it.url)
+      .option("dbtable", tableName)
+      .option("user", it.user)
+      .option("password", it.password)
+      .load()
+      .limit(2)
+
+    assert(df.count() == 2)
+    val scanDescriptions = df.queryExecution.executedPlan.collect {
+      case scan: BatchScanExec => scan.scan.description()
+    }
+    val executedPlan = df.queryExecution.executedPlan.toString()
+    assert(
+      scanDescriptions.exists(_.contains("pushedLimit=2")) ||
+        executedPlan.contains("pushedLimit=2") ||
+        executedPlan.contains("PushedLimit"),
+      s"Expected pushed limit marker in scan description, got:\n${scanDescriptions.mkString("\n")}\n$executedPlan"
+    )
+  }
+
+  test("auto bounds partitioning reads complete dataset") {
+    val it = requireTarget()
+
+    val df = spark.read
+      .format("oracle11")
+      .option("url", it.url)
+      .option("dbtable", tableName)
+      .option("user", it.user)
+      .option("password", it.password)
+      .option("partitionColumn", "ID")
+      .option("numPartitions", "10")
+      .option("autoPartitionBounds", "true")
+      .option("autoPartitionMinRowsPerPartition", "1")
+      .load()
+
+    assert(df.count() == 3)
+    val partitions = df.rdd.getNumPartitions
+    assert(partitions >= 1 && partitions <= 10)
+    assert(partitions > 1)
+  }
+
+  test("large IN predicate does not fail with ORA-01795") {
+    val it = requireTarget()
+    val inValues = (1 to 1205).map(Int.box).toSeq
+
+    val df = spark.read
+      .format("oracle11")
+      .option("url", it.url)
+      .option("dbtable", tableName)
+      .option("user", it.user)
+      .option("password", it.password)
+      .load()
+      .where(col("ID").isin(inValues: _*))
+
+    assert(df.count() == 3)
+
+    val scanDescriptions = df.queryExecution.executedPlan.collect {
+      case scan: BatchScanExec => scan.scan.description()
+    }
+    val executedPlan = df.queryExecution.executedPlan.toString()
+    assert(
+      scanDescriptions.exists(_.contains("In(ID")) ||
+        executedPlan.contains("In(") ||
+        executedPlan.contains("InSet"),
+      s"Expected pushed IN filter in scan description, got:\n${scanDescriptions.mkString("\n")}\n$executedPlan"
+    )
   }
 }

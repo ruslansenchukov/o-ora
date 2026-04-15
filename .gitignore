@@ -8,3 +8,4 @@ project/project/
 *.iml
 venv
 __pycache__
+spark-warehouse/

@@ -8,10 +8,14 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 final case class Oracle11PartitioningOptions(
     partitionColumn: String,
-    lowerBound: String,
-    upperBound: String,
-    numPartitions: Int)
-    extends Serializable
+    numPartitions: Int,
+    lowerBound: Option[String],
+    upperBound: Option[String],
+    autoBounds: Boolean)
+    extends Serializable {
+
+  def isManualBounds: Boolean = !autoBounds
+}
 
 final case class Oracle11Options(
     url: String,
@@ -20,6 +24,12 @@ final case class Oracle11Options(
     dbtable: Option[String],
     query: Option[String],
     fetchSize: Int,
+    connectTimeoutMs: Option[Int],
+    readTimeoutMs: Option[Int],
+    queryTimeoutSec: Option[Int],
+    maxInListSize: Int,
+    schemaCacheTtlSec: Int,
+    autoPartitionMinRowsPerPartition: Long,
     partitioning: Option[Oracle11PartitioningOptions])
     extends Serializable {
 
@@ -28,6 +38,9 @@ final case class Oracle11Options(
 
 object Oracle11Options {
   private val DefaultFetchSize = 1000
+  private val DefaultMaxInListSize = 1000
+  private val DefaultSchemaCacheTtlSec = 300
+  private val DefaultAutoPartitionMinRowsPerPartition = 100000L
 
   def fromCaseInsensitive(options: CaseInsensitiveStringMap): Oracle11Options = {
     val data = Option(options)
@@ -68,12 +81,35 @@ object Oracle11Options {
 
     val fetchSize = optional("fetchsize") match {
       case Some(value) =>
-        val parsed = parseInt(value, "fetchsize")
+        val parsed = parsePositiveInt(value, "fetchsize")
         if (parsed <= 0) {
           throw new IllegalArgumentException(s"Option 'fetchsize' must be > 0, got $parsed")
         }
         parsed
       case None => DefaultFetchSize
+    }
+
+    val connectTimeoutMs = optional("connecttimeoutms").map(parsePositiveInt(_, "connectTimeoutMs"))
+    val readTimeoutMs = optional("readtimeoutms").map(parsePositiveInt(_, "readTimeoutMs"))
+    val queryTimeoutSec = optional("querytimeoutsec").map(parsePositiveInt(_, "queryTimeoutSec"))
+
+    val maxInListSize = optional("maxinlistsize") match {
+      case Some(value) => parsePositiveInt(value, "maxInListSize")
+      case None        => DefaultMaxInListSize
+    }
+
+    val schemaCacheTtlSec = optional("schemacachettlsec") match {
+      case Some(value) => parseInt(value, "schemaCacheTtlSec")
+      case None        => DefaultSchemaCacheTtlSec
+    }
+
+    val autoPartitionBounds = optional("autopartitionbounds")
+      .map(parseBoolean(_, "autoPartitionBounds"))
+      .getOrElse(false)
+
+    val autoPartitionMinRowsPerPartition = optional("autopartitionminrowsperpartition") match {
+      case Some(value) => parsePositiveLong(value, "autoPartitionMinRowsPerPartition")
+      case None        => DefaultAutoPartitionMinRowsPerPartition
     }
 
     val partitionColumn = optional("partitioncolumn")
@@ -82,27 +118,51 @@ object Oracle11Options {
     val numPartitions = optional("numpartitions")
 
     val partitioning = {
-      val items = Seq(partitionColumn, lowerBound, upperBound, numPartitions)
-      if (items.exists(_.isDefined) && !items.forall(_.isDefined)) {
-        throw new IllegalArgumentException(
-          "Options 'partitionColumn', 'lowerBound', 'upperBound', and 'numPartitions' must be provided together")
-      }
+      if (autoPartitionBounds) {
+        val parsedPartitions = numPartitions
+          .map(parsePositiveInt(_, "numPartitions"))
+          .getOrElse {
+            throw new IllegalArgumentException(
+              "Option 'autoPartitionBounds=true' requires 'numPartitions'")
+          }
 
-      if (items.forall(_.isDefined)) {
-        val parsedPartitions = parseInt(numPartitions.get, "numPartitions")
-        if (parsedPartitions <= 0) {
-          throw new IllegalArgumentException(s"Option 'numPartitions' must be > 0, got $parsedPartitions")
+        val column = partitionColumn.getOrElse {
+          throw new IllegalArgumentException(
+            "Option 'autoPartitionBounds=true' requires 'partitionColumn'")
+        }
+
+        if (lowerBound.isDefined || upperBound.isDefined) {
+          throw new IllegalArgumentException(
+            "Options 'lowerBound' and 'upperBound' must not be provided when 'autoPartitionBounds=true'")
         }
 
         Some(
           Oracle11PartitioningOptions(
-            partitionColumn = partitionColumn.get,
-            lowerBound = lowerBound.get,
-            upperBound = upperBound.get,
-            numPartitions = parsedPartitions
+            partitionColumn = column,
+            numPartitions = parsedPartitions,
+            lowerBound = None,
+            upperBound = None,
+            autoBounds = true
           ))
       } else {
-        None
+        val items = Seq(partitionColumn, lowerBound, upperBound, numPartitions)
+        if (items.exists(_.isDefined) && !items.forall(_.isDefined)) {
+          throw new IllegalArgumentException(
+            "Options 'partitionColumn', 'lowerBound', 'upperBound', and 'numPartitions' must be provided together")
+        }
+
+        if (items.forall(_.isDefined)) {
+          Some(
+            Oracle11PartitioningOptions(
+              partitionColumn = partitionColumn.get,
+              numPartitions = parsePositiveInt(numPartitions.get, "numPartitions"),
+              lowerBound = lowerBound,
+              upperBound = upperBound,
+              autoBounds = false
+            ))
+        } else {
+          None
+        }
       }
     }
 
@@ -113,6 +173,12 @@ object Oracle11Options {
       dbtable = dbtable,
       query = query,
       fetchSize = fetchSize,
+      connectTimeoutMs = connectTimeoutMs,
+      readTimeoutMs = readTimeoutMs,
+      queryTimeoutSec = queryTimeoutSec,
+      maxInListSize = maxInListSize,
+      schemaCacheTtlSec = schemaCacheTtlSec,
+      autoPartitionMinRowsPerPartition = autoPartitionMinRowsPerPartition,
       partitioning = partitioning
     )
   }
@@ -123,6 +189,38 @@ object Oracle11Options {
     } catch {
       case _: NumberFormatException =>
         throw new IllegalArgumentException(s"Option '$name' must be an integer, got '$value'")
+    }
+  }
+
+  private def parsePositiveInt(value: String, name: String): Int = {
+    val parsed = parseInt(value, name)
+    if (parsed <= 0) {
+      throw new IllegalArgumentException(s"Option '$name' must be > 0, got $parsed")
+    }
+    parsed
+  }
+
+  private def parsePositiveLong(value: String, name: String): Long = {
+    val parsed =
+      try {
+        value.toLong
+      } catch {
+        case _: NumberFormatException =>
+          throw new IllegalArgumentException(s"Option '$name' must be a long integer, got '$value'")
+      }
+
+    if (parsed <= 0L) {
+      throw new IllegalArgumentException(s"Option '$name' must be > 0, got $parsed")
+    }
+    parsed
+  }
+
+  private def parseBoolean(value: String, name: String): Boolean = {
+    value.trim.toLowerCase(Locale.ROOT) match {
+      case "true"  => true
+      case "false" => false
+      case _ =>
+        throw new IllegalArgumentException(s"Option '$name' must be true or false, got '$value'")
     }
   }
 }

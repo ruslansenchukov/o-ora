@@ -1,7 +1,7 @@
 package com.company.spark.oracle11
 
 import java.math.{BigDecimal => JBigDecimal}
-import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, SQLException, Timestamp, Types}
+import java.sql.{Connection, Date, DriverManager, PreparedStatement, ResultSet, SQLException, Timestamp, Types}
 import java.time.{Instant, LocalDate, LocalDateTime, OffsetDateTime}
 import java.util.{Locale, Properties}
 
@@ -14,12 +14,16 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
 object Oracle11JdbcUtils {
+  private type ColumnReader = (ResultSet, Int) => Any
   private val localeRetryLock = new Object
 
   def openConnection(options: Oracle11Options): Connection = {
     val props = new Properties()
     props.setProperty("user", options.user)
     props.setProperty("password", options.password)
+    options.connectTimeoutMs.foreach(v => props.setProperty("oracle.net.CONNECT_TIMEOUT", v.toString))
+    options.readTimeoutMs.foreach(v => props.setProperty("oracle.jdbc.ReadTimeout", v.toString))
+
     try {
       DriverManager.getConnection(options.url, props)
     } catch {
@@ -120,86 +124,126 @@ object Oracle11JdbcUtils {
 
     Try {
       expectedType match {
-        case IntegerType  => toInt(value)
-        case LongType     => toLong(value)
-        case DoubleType   => toDouble(value)
-        case FloatType    => toFloat(value)
-        case ShortType    => toShort(value)
-        case ByteType     => toByte(value)
-        case BooleanType  => toBoolean(value)
-        case StringType   => value.toString
-        case BinaryType   => value.asInstanceOf[Array[Byte]]
+        case IntegerType    => toInt(value)
+        case LongType       => toLong(value)
+        case DoubleType     => toDouble(value)
+        case FloatType      => toFloat(value)
+        case ShortType      => toShort(value)
+        case ByteType       => toByte(value)
+        case BooleanType    => toBoolean(value)
+        case StringType     => value.toString
+        case BinaryType     => value.asInstanceOf[Array[Byte]]
         case _: DecimalType => toJavaBigDecimal(value)
-        case TimestampType => toTimestamp(value)
-        case DateType      => toDate(value)
-        case _             => value
+        case TimestampType  => toTimestamp(value)
+        case DateType       => toDate(value)
+        case _              => value
       }
     }.toOption
   }
 
-  def toInternalRow(resultSet: ResultSet, schema: StructType): InternalRow = {
+  def buildInternalRowExtractor(schema: StructType): ResultSet => InternalRow = {
     if (schema.isEmpty) {
-      return InternalRow.empty
+      (_: ResultSet) => InternalRow.empty
+    } else {
+      val readers: Array[ColumnReader] = schema.fields.map(f => buildColumnReader(f.dataType)).toArray
+      (resultSet: ResultSet) => {
+        val values = new Array[Any](readers.length)
+        var i = 0
+        while (i < readers.length) {
+          values(i) = readers(i)(resultSet, i + 1)
+          i += 1
+        }
+        new GenericInternalRow(values)
+      }
     }
+  }
 
-    val values = new Array[Any](schema.length)
-    var i = 0
-    while (i < schema.length) {
-      val jdbcIndex = i + 1
-      val value = schema.fields(i).dataType match {
-        case IntegerType =>
-          val v = resultSet.getInt(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case LongType =>
-          val v = resultSet.getLong(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case DoubleType =>
-          val v = resultSet.getDouble(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case FloatType =>
-          val v = resultSet.getFloat(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case ShortType =>
-          val v = resultSet.getShort(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case ByteType =>
-          val v = resultSet.getByte(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case BooleanType =>
-          val v = resultSet.getBoolean(jdbcIndex)
-          if (resultSet.wasNull()) null else v
-        case StringType =>
-          val v = resultSet.getString(jdbcIndex)
-          if (v == null) null else UTF8String.fromString(v)
-        case BinaryType =>
-          resultSet.getBytes(jdbcIndex)
-        case t: DecimalType =>
-          val v = resultSet.getBigDecimal(jdbcIndex)
-          if (v == null) {
-            null
-          } else {
-            try {
-              Decimal(v, t.precision, t.scale)
-            } catch {
-              case _: ArithmeticException => Decimal(v)
-            }
-          }
-        case TimestampType =>
-          val ts = resultSet.getTimestamp(jdbcIndex)
-          if (ts == null) null else DateTimeUtils.fromJavaTimestamp(ts)
-        case DateType =>
-          val date = resultSet.getDate(jdbcIndex)
-          if (date == null) null else DateTimeUtils.fromJavaDate(date)
-        case _ =>
-          val v = resultSet.getObject(jdbcIndex)
-          if (v == null) null else UTF8String.fromString(v.toString)
+  def toInternalRow(resultSet: ResultSet, schema: StructType): InternalRow =
+    buildInternalRowExtractor(schema)(resultSet)
+
+  private def buildColumnReader(dataType: DataType): ColumnReader = dataType match {
+    case IntegerType =>
+      (rs, idx) => {
+        val v = rs.getInt(idx)
+        if (rs.wasNull()) null else v
       }
 
-      values(i) = value
-      i += 1
-    }
+    case LongType =>
+      (rs, idx) => {
+        val v = rs.getLong(idx)
+        if (rs.wasNull()) null else v
+      }
 
-    new GenericInternalRow(values)
+    case DoubleType =>
+      (rs, idx) => {
+        val v = rs.getDouble(idx)
+        if (rs.wasNull()) null else v
+      }
+
+    case FloatType =>
+      (rs, idx) => {
+        val v = rs.getFloat(idx)
+        if (rs.wasNull()) null else v
+      }
+
+    case ShortType =>
+      (rs, idx) => {
+        val v = rs.getShort(idx)
+        if (rs.wasNull()) null else v
+      }
+
+    case ByteType =>
+      (rs, idx) => {
+        val v = rs.getByte(idx)
+        if (rs.wasNull()) null else v
+      }
+
+    case BooleanType =>
+      (rs, idx) => {
+        val v = rs.getBoolean(idx)
+        if (rs.wasNull()) null else v
+      }
+
+    case StringType =>
+      (rs, idx) => {
+        val v = rs.getString(idx)
+        if (v == null) null else UTF8String.fromString(v)
+      }
+
+    case BinaryType =>
+      (rs, idx) => rs.getBytes(idx)
+
+    case t: DecimalType =>
+      (rs, idx) => {
+        val v = rs.getBigDecimal(idx)
+        if (v == null) {
+          null
+        } else {
+          try {
+            Decimal(v, t.precision, t.scale)
+          } catch {
+            case _: ArithmeticException => Decimal(v)
+          }
+        }
+      }
+
+    case TimestampType =>
+      (rs, idx) => {
+        val ts = rs.getTimestamp(idx)
+        if (ts == null) null else DateTimeUtils.fromJavaTimestamp(ts)
+      }
+
+    case DateType =>
+      (rs, idx) => {
+        val d = rs.getDate(idx)
+        if (d == null) null else DateTimeUtils.fromJavaDate(d)
+      }
+
+    case _ =>
+      (rs, idx) => {
+        val v = rs.getObject(idx)
+        if (v == null) null else UTF8String.fromString(v.toString)
+      }
   }
 
   def closeQuietly(resource: AutoCloseable): Unit = {
@@ -213,19 +257,19 @@ object Oracle11JdbcUtils {
   }
 
   private def sqlNullType(dataType: DataType): Int = dataType match {
-    case IntegerType  => Types.INTEGER
-    case LongType     => Types.BIGINT
-    case DoubleType   => Types.DOUBLE
-    case FloatType    => Types.FLOAT
-    case ShortType    => Types.SMALLINT
-    case ByteType     => Types.TINYINT
-    case BooleanType  => Types.BOOLEAN
-    case StringType   => Types.VARCHAR
-    case BinaryType   => Types.BINARY
+    case IntegerType    => Types.INTEGER
+    case LongType       => Types.BIGINT
+    case DoubleType     => Types.DOUBLE
+    case FloatType      => Types.FLOAT
+    case ShortType      => Types.SMALLINT
+    case ByteType       => Types.TINYINT
+    case BooleanType    => Types.BOOLEAN
+    case StringType     => Types.VARCHAR
+    case BinaryType     => Types.BINARY
     case _: DecimalType => Types.DECIMAL
-    case TimestampType => Types.TIMESTAMP
-    case DateType      => Types.DATE
-    case _             => Types.JAVA_OBJECT
+    case TimestampType  => Types.TIMESTAMP
+    case DateType       => Types.DATE
+    case _              => Types.JAVA_OBJECT
   }
 
   private def toInt(value: Any): Int = value match {
@@ -273,35 +317,39 @@ object Oracle11JdbcUtils {
   }
 
   private def toJavaBigDecimal(value: Any): JBigDecimal = value match {
-    case d: Decimal                      => d.toJavaBigDecimal
-    case bd: JBigDecimal                 => bd
-    case bd: scala.math.BigDecimal       => bd.bigDecimal
-    case n: java.lang.Number             => new JBigDecimal(n.toString)
-    case s: String                       => new JBigDecimal(s)
-    case other                           => throw new IllegalArgumentException(s"Cannot cast '$other' to BigDecimal")
+    case d: Decimal                => d.toJavaBigDecimal
+    case bd: JBigDecimal           => bd
+    case bd: scala.math.BigDecimal => bd.bigDecimal
+    case n: java.lang.Number       => new JBigDecimal(n.toString)
+    case s: String                 => new JBigDecimal(s)
+    case other                     => throw new IllegalArgumentException(s"Cannot cast '$other' to BigDecimal")
   }
 
   private def toTimestamp(value: Any): Timestamp = value match {
-    case ts: Timestamp             => ts
-    case d: java.util.Date         => new Timestamp(d.getTime)
-    case i: Instant                => Timestamp.from(i)
-    case odt: OffsetDateTime       => Timestamp.from(odt.toInstant)
-    case ldt: LocalDateTime        => Timestamp.valueOf(ldt)
-    case ld: LocalDate             => Timestamp.valueOf(ld.atStartOfDay())
-    case s: String                 => parseTimestamp(s)
-    case l: java.lang.Long         => new Timestamp(l)
-    case n: java.lang.Number       => new Timestamp(n.longValue())
-    case other                     => throw new IllegalArgumentException(s"Cannot cast '$other' to Timestamp")
+    case ts: Timestamp       => ts
+    case d: java.util.Date   => new Timestamp(d.getTime)
+    case i: Instant          => Timestamp.from(i)
+    case odt: OffsetDateTime => Timestamp.from(odt.toInstant)
+    case ldt: LocalDateTime  => Timestamp.valueOf(ldt)
+    case ld: LocalDate       => Timestamp.valueOf(ld.atStartOfDay())
+    case s: String           => parseTimestamp(s)
+    case l: java.lang.Long   => new Timestamp(l)
+    case n: java.lang.Number => new Timestamp(n.longValue())
+    case other               => throw new IllegalArgumentException(s"Cannot cast '$other' to Timestamp")
   }
 
-  private def toDate(value: Any): java.sql.Date = value match {
-    case d: java.sql.Date   => d
-    case ld: LocalDate      => java.sql.Date.valueOf(ld)
-    case ldt: LocalDateTime => java.sql.Date.valueOf(ldt.toLocalDate)
-    case ts: Timestamp      => new java.sql.Date(ts.getTime)
-    case s: String          => java.sql.Date.valueOf(LocalDate.parse(s))
-    case other              => throw new IllegalArgumentException(s"Cannot cast '$other' to Date")
+  private def toDate(value: Any): Date = value match {
+    case d: Date             => d
+    case ld: LocalDate       => Date.valueOf(ld)
+    case ldt: LocalDateTime  => Date.valueOf(ldt.toLocalDate)
+    case ts: Timestamp       => new Date(ts.getTime)
+    case s: String           => parseDate(s)
+    case other               => throw new IllegalArgumentException(s"Cannot cast '$other' to Date")
   }
+
+  def parseTimestampBound(raw: String): Timestamp = parseTimestamp(raw)
+
+  def parseDateBound(raw: String): Date = parseDate(raw)
 
   private def parseTimestamp(raw: String): Timestamp = {
     val value = raw.trim
@@ -316,12 +364,25 @@ object Oracle11JdbcUtils {
     )
 
     attempts.iterator
-      .map { parser => Try(parser()) }
+      .map(parser => Try(parser()))
       .collectFirst { case scala.util.Success(ts) => ts }
       .getOrElse {
         throw new IllegalArgumentException(s"Cannot parse timestamp value '$raw'")
       }
   }
 
-  def parseTimestampBound(raw: String): Timestamp = parseTimestamp(raw)
+  private def parseDate(raw: String): Date = {
+    val value = raw.trim
+    val attempts: Seq[() => Date] = Seq(
+      () => Date.valueOf(LocalDate.parse(value)),
+      () => new Date(parseTimestamp(value).getTime)
+    )
+
+    attempts.iterator
+      .map(parser => Try(parser()))
+      .collectFirst { case scala.util.Success(date) => date }
+      .getOrElse {
+        throw new IllegalArgumentException(s"Cannot parse date value '$raw'")
+      }
+  }
 }

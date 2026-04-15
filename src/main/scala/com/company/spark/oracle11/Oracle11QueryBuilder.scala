@@ -1,6 +1,6 @@
 package com.company.spark.oracle11
 
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{IntegerType, StructType}
 
 final case class Oracle11BuiltQuery(sql: String, params: Seq[JdbcParameter])
 
@@ -28,13 +28,19 @@ object Oracle11QueryBuilder {
       }
 
     val baseSql = s"SELECT $projection FROM ${relation.fromClause}$whereClause"
+    val baseParams = predicates.flatMap(_.params)
 
-    val sql = limit match {
-      // Oracle 11 does not support ANSI FETCH FIRST, so we keep a rownum wrapper as extension point.
-      case Some(value) if value > 0 => s"SELECT * FROM ($baseSql) ORA11_LIMIT WHERE ROWNUM <= $value"
-      case _                        => baseSql
+    val (sql, params) = limit match {
+      // Oracle 11 does not support ANSI FETCH FIRST, so we keep a rownum wrapper.
+      case Some(value) if value > 0 =>
+        (
+          s"SELECT * FROM ($baseSql) ORA11_LIMIT WHERE ROWNUM <= ?",
+          baseParams :+ JdbcParameter(value, IntegerType)
+        )
+      case _ =>
+        (baseSql, baseParams)
     }
 
-    Oracle11BuiltQuery(sql, predicates.flatMap(_.params))
+    Oracle11BuiltQuery(sql, params)
   }
 }
