@@ -6,6 +6,7 @@ import java.util.logging.Logger
 
 import scala.util.control.NonFatal
 
+import com.company.spark.common.{PartitionPlanner => CommonPartitionPlanner}
 import org.apache.spark.sql.types._
 
 object Oracle11PartitionPlanner {
@@ -23,6 +24,7 @@ object Oracle11PartitionPlanner {
         Array(Oracle11InputPartition(None))
 
       case Some(partitioning) =>
+        val dialect = OracleDialect
         val field = schema.fields
           .find(_.name.equalsIgnoreCase(partitioning.partitionColumn))
           .getOrElse {
@@ -35,7 +37,7 @@ object Oracle11PartitionPlanner {
           return Array(Oracle11InputPartition(None))
         }
 
-        val columnSql = Oracle11JdbcUtils.quoteIdentifier(field.name)
+        val columnSql = dialect.quoteIdentifier(field.name)
 
         if (partitioning.autoBounds) {
           try {
@@ -226,7 +228,7 @@ object Oracle11PartitionPlanner {
     val boundaries = (1 until numPartitions).map { i =>
       castNumericBoundary(lower + stride * i, boundaryType)
     }
-    buildPartitions(columnSql, boundaries, boundaryType)
+    buildPartitionsFromBoundaries(columnSql, boundaries, boundaryType)
   }
 
   private def numericBoundaryType(dataType: DataType): DataType = dataType match {
@@ -301,7 +303,7 @@ object Oracle11PartitionPlanner {
       new Date(lowerMs + stride * i)
     }
 
-    buildPartitions(columnSql, boundaries, DateType)
+    buildPartitionsFromBoundaries(columnSql, boundaries, DateType)
   }
 
   private def planTimestamp(
@@ -327,41 +329,44 @@ object Oracle11PartitionPlanner {
       new Timestamp(lowerMs + stride * i)
     }
 
-    buildPartitions(columnSql, boundaries, TimestampType)
+    buildPartitionsFromBoundaries(columnSql, boundaries, TimestampType)
   }
 
-  private def buildPartitions(
+  private def buildPartitionsFromBoundaries(
       columnSql: String,
       boundaries: Seq[Any],
       boundaryType: DataType): Array[Oracle11InputPartition] = {
 
-    if (boundaries.isEmpty) {
-      return Array(Oracle11InputPartition(None))
+    val ranges = CommonPartitionPlanner.planPartitions(boundaries)
+    if (ranges.isEmpty) {
+      Array(Oracle11InputPartition(None))
+    } else {
+      ranges.map { range =>
+        val predicate = (range.lowerInclusive, range.upperExclusive, range.includeNullsInLowerBucket) match {
+          case (None, Some(upper), true) =>
+            Oracle11SqlPredicate(
+              sql = s"($columnSql < ? OR $columnSql IS NULL)",
+              params = Seq(JdbcParameter(upper, boundaryType))
+            )
+
+          case (Some(lower), Some(upper), _) =>
+            Oracle11SqlPredicate(
+              sql = s"($columnSql >= ? AND $columnSql < ?)",
+              params = Seq(JdbcParameter(lower, boundaryType), JdbcParameter(upper, boundaryType))
+            )
+
+          case (Some(lower), None, _) =>
+            Oracle11SqlPredicate(
+              sql = s"($columnSql >= ?)",
+              params = Seq(JdbcParameter(lower, boundaryType))
+            )
+
+          case _ =>
+            throw new IllegalStateException("Unexpected partition range shape")
+        }
+        Oracle11InputPartition(Some(predicate))
+      }.toArray
     }
-
-    val first = Oracle11SqlPredicate(
-      sql = s"($columnSql < ? OR $columnSql IS NULL)",
-      params = Seq(JdbcParameter(boundaries.head, boundaryType))
-    )
-
-    val middle = boundaries.sliding(2).toSeq.map {
-      case Seq(start, end) =>
-        Oracle11SqlPredicate(
-          sql = s"($columnSql >= ? AND $columnSql < ?)",
-          params = Seq(JdbcParameter(start, boundaryType), JdbcParameter(end, boundaryType))
-        )
-      case _ =>
-        throw new IllegalStateException("Unexpected partition boundary window")
-    }
-
-    val last = Oracle11SqlPredicate(
-      sql = s"($columnSql >= ?)",
-      params = Seq(JdbcParameter(boundaries.last, boundaryType))
-    )
-
-    (first +: middle :+ last)
-      .map(p => Oracle11InputPartition(Some(p)))
-      .toArray
   }
 
   private def parseBigDecimal(raw: String, optionName: String): BigDecimal = {

@@ -34,9 +34,9 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
     val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
 
     assert(partitions.length == 3)
-    assert(partitions.head.predicate.exists(_.sql.contains("OR \"ID\" IS NULL")))
-    assert(partitions(1).predicate.exists(_.sql.contains("\"ID\" >= ? AND \"ID\" < ?")))
-    assert(partitions(2).predicate.exists(_.sql.contains("\"ID\" >= ?")))
+    assert(partitions.head.predicate.exists(_.sql == "(\"ID\" < ? OR \"ID\" IS NULL)"))
+    assert(partitions(1).predicate.exists(_.sql == "(\"ID\" >= ? AND \"ID\" < ?)"))
+    assert(partitions(2).predicate.exists(_.sql == "(\"ID\" >= ?)"))
     assert(partitions.head.predicate.get.params.head.sparkType == IntegerType)
     assert(partitions(1).predicate.get.params.forall(_.sparkType == IntegerType))
   }
@@ -73,6 +73,9 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
 
     assert(partitions.length == 3)
     assert(partitions.forall(_.predicate.nonEmpty))
+    assert(partitions.head.predicate.exists(_.sql == "(\"CREATED_AT\" < ? OR \"CREATED_AT\" IS NULL)"))
+    assert(partitions(1).predicate.exists(_.sql == "(\"CREATED_AT\" >= ? AND \"CREATED_AT\" < ?)"))
+    assert(partitions(2).predicate.exists(_.sql == "(\"CREATED_AT\" >= ?)"))
     assert(partitions.head.predicate.get.params.head.sparkType == TimestampType)
   }
 
@@ -89,6 +92,9 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
     val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
 
     assert(partitions.length == 3)
+    assert(partitions.head.predicate.exists(_.sql == "(\"DT\" < ? OR \"DT\" IS NULL)"))
+    assert(partitions(1).predicate.exists(_.sql == "(\"DT\" >= ? AND \"DT\" < ?)"))
+    assert(partitions(2).predicate.exists(_.sql == "(\"DT\" >= ?)"))
     assert(partitions.head.predicate.get.params.head.sparkType == DateType)
   }
 

@@ -4,6 +4,7 @@ import java.util.Locale
 
 import scala.collection.JavaConverters._
 
+import com.company.spark.common.BaseOptions
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 final case class Oracle11PartitioningOptions(
@@ -34,6 +35,20 @@ final case class Oracle11Options(
     extends Serializable {
 
   lazy val relation: Oracle11Relation = Oracle11Relation.fromOptions(this)
+
+  lazy val baseOptions: BaseOptions =
+    BaseOptions(
+      url = url,
+      user = user,
+      password = password,
+      dbtable = dbtable,
+      query = query,
+      fetchSize = fetchSize,
+      partitionColumn = partitioning.map(_.partitionColumn),
+      lowerBound = partitioning.flatMap(_.lowerBound),
+      upperBound = partitioning.flatMap(_.upperBound),
+      numPartitions = partitioning.map(_.numPartitions)
+    )
 }
 
 object Oracle11Options {

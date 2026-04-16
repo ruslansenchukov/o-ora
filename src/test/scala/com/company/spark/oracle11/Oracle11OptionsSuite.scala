@@ -191,4 +191,31 @@ final class Oracle11OptionsSuite extends AnyFunSuite {
 
     assert(error.getMessage.contains("maxInListSize"))
   }
+
+  test("expose baseOptions wrapper with parsed partition values") {
+    val options = Oracle11Options.fromMap(
+      Map(
+        "url" -> "jdbc:oracle:thin:@//localhost:1521/XE",
+        "user" -> "hr",
+        "password" -> "hr",
+        "dbtable" -> "HR.EMPLOYEES",
+        "fetchsize" -> "1500",
+        "partitionColumn" -> "ID",
+        "lowerBound" -> "1",
+        "upperBound" -> "100",
+        "numPartitions" -> "4"
+      ))
+
+    val base = options.baseOptions
+    assert(base.url == options.url)
+    assert(base.user == options.user)
+    assert(base.password == options.password)
+    assert(base.dbtable == options.dbtable)
+    assert(base.query == options.query)
+    assert(base.fetchSize == 1500)
+    assert(base.partitionColumn.contains("ID"))
+    assert(base.lowerBound.contains("1"))
+    assert(base.upperBound.contains("100"))
+    assert(base.numPartitions.contains(4))
+  }
 }

@@ -13,10 +13,11 @@ object Oracle11QueryBuilder {
       pushedPredicate: Option[Oracle11SqlPredicate],
       limit: Option[Int] = None): Oracle11BuiltQuery = {
 
+    val dialect = OracleDialect
     val projection = if (requiredSchema.isEmpty) {
       "1"
     } else {
-      requiredSchema.fields.map(f => Oracle11JdbcUtils.quoteIdentifier(f.name)).mkString(", ")
+      requiredSchema.fields.map(f => dialect.quoteIdentifier(f.name)).mkString(", ")
     }
 
     val predicates = Seq(partitionPredicate, pushedPredicate).flatten
