@@ -9,3 +9,6 @@ project/project/
 venv
 __pycache__
 spark-warehouse/
+.coursier/
+.sbt-boot/
+.sbt-global/
