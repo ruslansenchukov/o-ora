@@ -21,6 +21,7 @@ final class Oracle11OptionsSuite extends AnyFunSuite {
     assert(options.queryTimeoutSec.isEmpty)
     assert(options.maxInListSize == 1000)
     assert(options.schemaCacheTtlSec == 300)
+    assert(options.connectString == "//localhost:1521/XE")
     assert(options.autoPartitionMinRowsPerPartition == 100000L)
     assert(options.partitioning.isEmpty)
   }
@@ -83,29 +84,7 @@ final class Oracle11OptionsSuite extends AnyFunSuite {
     assert(!p.autoBounds)
   }
 
-  test("parse auto partition options") {
-    val options = Oracle11Options.fromMap(
-      Map(
-        "url" -> "u",
-        "user" -> "a",
-        "password" -> "b",
-        "dbtable" -> "T",
-        "partitionColumn" -> "ID",
-        "numPartitions" -> "8",
-        "autoPartitionBounds" -> "true",
-        "autoPartitionMinRowsPerPartition" -> "50000"
-      ))
-
-    val p = options.partitioning.get
-    assert(p.partitionColumn == "ID")
-    assert(p.numPartitions == 8)
-    assert(p.autoBounds)
-    assert(p.lowerBound.isEmpty)
-    assert(p.upperBound.isEmpty)
-    assert(options.autoPartitionMinRowsPerPartition == 50000L)
-  }
-
-  test("reject auto bounds with manual bounds") {
+  test("auto bounds is disabled in native mode") {
     val error = intercept[IllegalArgumentException] {
       Oracle11Options.fromMap(
         Map(
@@ -116,44 +95,46 @@ final class Oracle11OptionsSuite extends AnyFunSuite {
           "partitionColumn" -> "ID",
           "numPartitions" -> "4",
           "autoPartitionBounds" -> "true",
-          "lowerBound" -> "1",
-          "upperBound" -> "100"
+          "lowerBound" -> "1"
         ))
     }
 
-    assert(error.getMessage.contains("must not be provided"))
+    assert(error.getMessage.contains("not supported"))
   }
 
-  test("auto bounds requires partitionColumn") {
+  test("parse host/port/serviceName contract with oracle aliases") {
+    val options = Oracle11Options.fromMap(
+      Map(
+        "oracle.host" -> "db.example.local",
+        "oracle.port" -> "1523",
+        "oracle.serviceName" -> "XE",
+        "oracle.user" -> "app_user",
+        "oracle.password" -> "app_pass",
+        "query" -> "select 1 from dual"
+      ))
+
+    assert(options.user == "app_user")
+    assert(options.password == "app_pass")
+    assert(options.url.startsWith("oci://db.example.local:1523"))
+    assert(options.connectString.contains("HOST=db.example.local"))
+    assert(options.connectString.contains("PORT=1523"))
+    assert(options.connectString.contains("SERVICE_NAME=XE"))
+  }
+
+  test("reject serviceName + sid together") {
     val error = intercept[IllegalArgumentException] {
       Oracle11Options.fromMap(
         Map(
-          "url" -> "u",
-          "user" -> "a",
-          "password" -> "b",
-          "dbtable" -> "T",
-          "numPartitions" -> "4",
-          "autoPartitionBounds" -> "true"
+          "oracle.host" -> "db.example.local",
+          "oracle.port" -> "1523",
+          "oracle.serviceName" -> "XE",
+          "oracle.sid" -> "XE",
+          "oracle.user" -> "app_user",
+          "oracle.password" -> "app_pass",
+          "dbtable" -> "APP_USER.ORDERS_V2"
         ))
     }
-
-    assert(error.getMessage.contains("requires 'partitionColumn'"))
-  }
-
-  test("auto bounds requires numPartitions") {
-    val error = intercept[IllegalArgumentException] {
-      Oracle11Options.fromMap(
-        Map(
-          "url" -> "u",
-          "user" -> "a",
-          "password" -> "b",
-          "dbtable" -> "T",
-          "partitionColumn" -> "ID",
-          "autoPartitionBounds" -> "true"
-        ))
-    }
-
-    assert(error.getMessage.contains("requires 'numPartitions'"))
+    assert(error.getMessage.contains("mutually exclusive"))
   }
 
   test("parse timeout and tuning options") {

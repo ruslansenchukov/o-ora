@@ -1,285 +1,179 @@
 # spark-oracle11
 
-`spark-oracle11` is a Spark DataSource V2 connector for Oracle via JDBC Thin only.
+Spark DataSource V2 connector for Oracle with a **native OCI/JNA backend**.
 
-It targets Spark `3.5.x`, Scala `2.12`, Java `11+`, and does not require Oracle Instant Client, OCI, `tnsnames.ora`, SQL*Plus, or native libraries.
+`format("oracle11")` is now native OCI.  
+Alias `format("oracle-native")` points to the same backend.
+
+JDBC is not used inside the native connector path. Spark built-in JDBC is only used as an external benchmark baseline.
+
+## Supported stack
+
+- Spark `3.5.x`
+- Scala `2.12`
+- Java `11+` (project currently built/tested with Java 17)
+
+## Native OCI requirements
+
+You must have Oracle client native libraries available on the machine where Spark driver/executors run:
+
+- Oracle Instant Client (or full Oracle client)
+- `libclntsh` visible via library path
+
+Typical environment setup examples:
+
+- macOS: `DYLD_LIBRARY_PATH=/path/to/instantclient`
+- Linux: `LD_LIBRARY_PATH=/path/to/instantclient`
 
 ## Build
 
 ```bash
-sbt clean assembly
+sbt clean compile
+sbt assembly
 ```
 
-Artifact:
+Assembly artifact:
 
 ```text
 target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar
 ```
 
-## Usage
+## Connection options (native)
 
-### Scala
+Connector accepts two contracts.
+
+1) URL-based:
+
+- `oracle.url` (or alias `url`)
+- `oracle.user` (or alias `user`)
+- `oracle.password` (or alias `password`)
+
+`oracle.url` can be:
+
+- Oracle JDBC thin URL (`jdbc:oracle:thin:@//host:1521/SERVICE`)
+- Oracle Net descriptor / easy connect tail (`//host:1521/SERVICE`, `(DESCRIPTION=...)`)
+
+2) Host-based:
+
+- `oracle.host`
+- `oracle.port`
+- exactly one of:
+  - `oracle.serviceName`
+  - `oracle.sid`
+- `oracle.user`
+- `oracle.password`
+
+Common read options:
+
+- exactly one of `dbtable` / `query`
+- `fetchsize` (default `1000`)
+- `partitionColumn`, `lowerBound`, `upperBound`, `numPartitions` (manual range partitioning)
+
+Native v1 limitation:
+
+- `autoPartitionBounds=true` is explicitly not supported
+
+## Spark read examples
+
+### `oracle11` short name (native)
 
 ```scala
 val df = spark.read
   .format("oracle11")
   .option("url", "jdbc:oracle:thin:@//host:1521/XE")
-  .option("dbtable", "HR.EMPLOYEES")
-  .option("user", "hr")
-  .option("password", "hr")
+  .option("user", "app_user")
+  .option("password", "app_pass")
+  .option("dbtable", "APP_USER.ORDERS_V2")
   .load()
 ```
 
-### PySpark
+### `oracle-native` alias
 
-```python
-df = (
-    spark.read.format("oracle11")
-    .option("url", "jdbc:oracle:thin:@//host:1521/XE")
-    .option("dbtable", "HR.EMPLOYEES")
-    .option("user", "hr")
-    .option("password", "hr")
-    .load()
-)
+```scala
+val df = spark.read
+  .format("oracle-native")
+  .option("oracle.host", "62.169.27.185")
+  .option("oracle.port", "1523")
+  .option("oracle.serviceName", "XE")
+  .option("oracle.user", "app_user")
+  .option("oracle.password", "app_pass")
+  .option("dbtable", "APP_USER.ORDERS_V2")
+  .load()
 ```
 
-### spark-submit (PySpark example)
+## OCI smoke test
+
+Integration smoke suite includes:
+
+- `SELECT 1 AS X FROM DUAL`
+- configurable real query test
+
+By default ITs are skipped unless enabled.
+
+Run:
 
 ```bash
-spark-submit \
-  --master "local[2]" \
-  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar \
-  examples/pyspark/read_oracle11_real.py \
-  --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
-  --dbtable "SCHEMA.TABLE_NAME" \
-  --user "YOUR_USER" \
-  --password "YOUR_PASSWORD" \
-  --count \
-  --show 20 \
-  --explain
+sbt -Doracle11.it.enabled=true \
+    -Doracle.host=62.169.27.185 \
+    -Doracle.port=1523 \
+    -Doracle.serviceName=XE \
+    -Doracle.user=app_user \
+    -Doracle.password=app_pass \
+    "IntegrationTest / test"
 ```
 
-## Options
-
-Required:
-
-- `url`
-- `user`
-- `password`
-- exactly one of `dbtable` / `query`
-
-Core optional:
-
-- `fetchsize` (default `1000`)
-- `connectTimeoutMs` (no default, disabled if absent)
-- `readTimeoutMs` (no default, disabled if absent)
-- `queryTimeoutSec` (no default, disabled if absent)
-- `maxInListSize` (default `1000`)
-- `schemaCacheTtlSec` (default `300`, disable cache with `<= 0`)
-
-Partitioning options:
-
-- `partitionColumn`
-- `numPartitions`
-- `lowerBound`
-- `upperBound`
-- `autoPartitionBounds` (default `false`)
-- `autoPartitionMinRowsPerPartition` (default `100000`)
-
-Contracts:
-
-- `dbtable` XOR `query`
-- manual partitioning requires full set: `partitionColumn + lowerBound + upperBound + numPartitions`
-- auto bounds requires: `autoPartitionBounds=true + partitionColumn + numPartitions`
-- with auto bounds, `lowerBound/upperBound` must be absent
-- for query mode + partitioning, `partitionColumn` must exist in query output
-
-## Oracle type mapping
-
-- `VARCHAR2`, `VARCHAR`, `CHAR`, `NCHAR`, `NVARCHAR2` -> `StringType`
-- `NUMBER(p,s)`:
-- `s = 0`: `IntegerType` (`p 1..9`), `LongType` (`p 10..18`), `DecimalType(p,0)` (`p 19..38`), else `DecimalType(38,0)`
-- `s > 0`: `DecimalType(p,s)` when valid, else `DoubleType`
-- `s < 0`: integer-scale `DecimalType` when valid, else `DoubleType`
-- `FLOAT` -> `DoubleType`
-- `DATE`, `TIMESTAMP` -> `TimestampType`
-- `CLOB`/`NCLOB` -> `StringType`
-- `BLOB`, `RAW`, `LONG RAW` -> `BinaryType`
-
-## Pushdown
-
-Column pruning:
-
-- supported
-
-Filter pushdown:
-
-- `EqualTo`
-- `GreaterThan`
-- `GreaterThanOrEqual`
-- `LessThan`
-- `LessThanOrEqual`
-- `In`
-- `IsNull`
-- `IsNotNull`
-- `And`
-- `Or`
-
-`In` enhancement:
-
-- large `IN` is chunked into OR-groups based on `maxInListSize` to avoid Oracle `ORA-01795`
-
-Limit pushdown:
-
-- supported via `ROWNUM <= ?`
-- for multi-partition reads it is marked as partially pushed so Spark still applies the global limit safely
-
-Safety:
-
-- SQL uses placeholders and typed bind parameters
-- unsupported filters are returned as unhandled to Spark
-
-## Partitioning
-
-Manual bounds:
-
-- same semantics as Spark JDBC: bounds define stride, not hard clipping
-- generated predicates are gap-free:
-- first: `(col < b1 OR col IS NULL)`
-- middle: `(col >= bi AND col < b{i+1})`
-- last: `(col >= b{n-1})`
-
-Auto bounds:
-
-- when enabled, connector runs `MIN/MAX/COUNT` over partition column (with already pushed predicates)
-- effective partition count is capped by both `numPartitions` and `autoPartitionMinRowsPerPartition`
-- if stats query fails, connector logs warning and falls back to single partition (no job failure)
-
-Temporal binding:
-
-- Date partitions bind `java.sql.Date`
-- Timestamp partitions bind `java.sql.Timestamp`
-
-## Schema inference cache
-
-- Per-JVM in-memory TTL cache keyed by `url + user + relation signature`
-- controlled by `schemaCacheTtlSec`
-- failed inference attempts are not cached
-
-## Tests
-
-Unit tests:
+Optional query override:
 
 ```bash
-sbt test
+-Doracle.it.testQuery="SELECT ID, AMOUNT, STATUS, CATEGORY FROM APP_USER.ORDERS_V2 WHERE ROWNUM <= 10"
 ```
 
-Integration tests:
+Legacy JDBC-oriented IT suite is disabled by default and requires explicit opt-in:
 
 ```bash
-sbt -Doracle11.it.enabled=true "IntegrationTest / test"
+-Doracle11.jdbc.it.enabled=true
 ```
 
-External Oracle target:
-
-```bash
-export ORA11_IT_URL='jdbc:oracle:thin:@//host:1521/SERVICE'
-export ORA11_IT_USER='user'
-export ORA11_IT_PASSWORD='password'
-sbt -Doracle11.it.enabled=true "IntegrationTest / test"
-```
-
-## Benchmark harness
+## Benchmark: Native vs Spark JDBC
 
 Script:
 
-- `examples/pyspark/benchmark_oracle11.py`
+- `examples/pyspark/benchmark_oracle11_vs_jdbc.py`
+
+Important:
+
+- Spark JDBC baseline needs external `ojdbc` jar on classpath.
+- Core assembly intentionally does not bundle `ojdbc`.
 
 Example:
 
 ```bash
 spark-submit \
   --master "local[2]" \
-  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar \
-  examples/pyspark/benchmark_oracle11.py \
-  --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
-  --dbtable "SCHEMA.BIG_TABLE" \
-  --user "YOUR_USER" \
-  --password "YOUR_PASSWORD" \
-  --warmup 1 \
-  --runs 5 \
-  --baseline-fetchsize 1000 \
-  --tuned-fetchsize 10000 \
-  --partition-column ID \
-  --num-partitions 16 \
-  --auto-partition-bounds
-```
-
-The script prints baseline vs tuned elapsed time and rows/sec deltas.
-
-`oracle11` vs standard Spark JDBC benchmark:
-
-```bash
-spark-submit \
-  --master "local[2]" \
-  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar \
+  --jars target/scala-2.12/spark-oracle11-0.1.2-SNAPSHOT-assembly.jar,/path/to/ojdbc8.jar \
   examples/pyspark/benchmark_oracle11_vs_jdbc.py \
-  --url "jdbc:oracle:thin:@//host:1521/SERVICE" \
-  --dbtable "SCHEMA.BIG_TABLE" \
-  --user "YOUR_USER" \
-  --password "YOUR_PASSWORD" \
+  --url "jdbc:oracle:thin:@//62.169.27.185:1523/XE" \
+  --user "app_user" \
+  --password "app_pass" \
+  --dbtable "APP_USER.ORDERS_V2" \
+  --select-cols "ID,AMOUNT,STATUS,CATEGORY" \
+  --fetch-size 5000 \
   --warmup 1 \
-  --runs 5 \
-  --run-order alternate
+  --runs 33 \
+  --run-order alternate \
+  --jdbc-driver-jar "/path/to/ojdbc8.jar"
 ```
 
-Fair A/B recommendations:
+Output includes:
 
-- keep `fetchsize` and partition settings identical between `oracle11` and `jdbc`
-- use the same projection/filter workload on both readers
-- use `--run-order alternate` to reduce cache/order bias
-- compare `avg`, `p90`, and `stddev` (not avg only)
+- per-run CSV-like lines: `engine,run,rows,duration_sec,rows_per_sec`
+- summary metrics: `avg/min/max/p50/p95`
+- speedup: `native_vs_jdbc`
 
-## Troubleshooting
+## Notes and current limitations
 
-- `DATA_SOURCE_NOT_FOUND: oracle11`: verify assembly jar path in `--jars`
-- `zsh: no matches found: local[2]`: quote master as `"local[2]"`
-- `ORA-12705`: connector retries connection once with temporary `en_US` locale override
-- `ORA-12705` with standard Spark `format("jdbc")`: use
-  `--conf "spark.driver.extraJavaOptions=-Duser.language=en -Duser.country=US"` and
-  `--conf "spark.executor.extraJavaOptions=-Duser.language=en -Duser.country=US"`,
-  or run `examples/pyspark/benchmark_oracle11_vs_jdbc.py` (locale fix is enabled there by default)
-- `Connection refused`: verify host/port/service and firewall/security group
-- `NoClassDefFoundError` for Oracle JDBC classes: ensure assembly jar is loaded
+- Read-only connector (no write path yet)
+- Manual partitioning only in native v1
+- `RAW/BLOB` are currently explicit unsupported in native schema mapping path
+- Legacy JDBC utilities remain in codebase for shared helper logic and backward compatibility tests, but native connector execution path does not use JDBC transport
 
-## Known limitations
-
-- read-only connector (no write path)
-- aggregate pushdown is not implemented
-- advanced predicate pushdown (`Not`, `StartsWith`, etc.) is not implemented
-- no catalog integration yet
-
-
-## Benchmark results
-
-```bash
-oracle11
-  rows: 9981
-  runs: 111
-  avg_sec: 1.0270
-  p50_sec: 1.0158
-  p90_sec: 1.1031
-  rows_per_sec: 9718.97
-
-jdbc
-  rows: 9981
-  runs: 111
-  avg_sec: 1.7597
-  p50_sec: 1.7407
-  p90_sec: 1.8690
-  rows_per_sec: 5672.09
-
-Delta (oracle11 vs jdbc)
-  avg_sec improvement: 41.64%
-  rows_per_sec improvement: 71.35%
-  ```

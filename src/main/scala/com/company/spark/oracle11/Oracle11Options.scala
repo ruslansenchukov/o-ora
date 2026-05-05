@@ -4,6 +4,8 @@ import java.util.Locale
 
 import scala.collection.JavaConverters._
 
+import com.company.spark.oracle.oci.OciConnection
+
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 final case class Oracle11PartitioningOptions(
@@ -19,6 +21,7 @@ final case class Oracle11PartitioningOptions(
 
 final case class Oracle11Options(
     url: String,
+    connectString: String,
     user: String,
     password: String,
     dbtable: Option[String],
@@ -59,19 +62,67 @@ object Oracle11Options {
       case (k, v) if v != null => k.toLowerCase(Locale.ROOT) -> v
     }
 
-    def required(name: String, trim: Boolean = true): String = {
-      val value = normalized.get(name).map(v => if (trim) v.trim else v)
-      value.filter(_.nonEmpty).getOrElse {
-        throw new IllegalArgumentException(s"Missing required option '$name'")
+    def value(name: String, trim: Boolean = true): Option[String] =
+      normalized
+        .get(name)
+        .map(v => if (trim) v.trim else v)
+        .filter(_.nonEmpty)
+
+    def requiredAny(names: Seq[String], trim: Boolean = true): String = {
+      val maybe = names.iterator.flatMap(name => value(name, trim)).toSeq.headOption
+      maybe.getOrElse {
+        throw new IllegalArgumentException(s"Missing required option. Provide one of: ${names.mkString(", ")}")
       }
     }
 
-    def optional(name: String): Option[String] =
-      normalized.get(name).map(_.trim).filter(_.nonEmpty)
+    def optional(name: String): Option[String] = value(name, trim = true)
 
-    val url = required("url")
-    val user = required("user")
-    val password = required("password", trim = false)
+    def optionalAny(names: Seq[String], trim: Boolean = true): Option[String] =
+      names.iterator.flatMap(name => value(name, trim)).toSeq.headOption
+
+    val user = requiredAny(Seq("oracle.user", "user"))
+    val password = requiredAny(Seq("oracle.password", "password"), trim = false)
+
+    val urlOption = optionalAny(Seq("oracle.url", "url"))
+    val hostOption = optional("oracle.host")
+    val portOption = optional("oracle.port")
+    val serviceNameOption = optional("oracle.servicename")
+    val sidOption = optional("oracle.sid")
+
+    if (serviceNameOption.isDefined && sidOption.isDefined) {
+      throw new IllegalArgumentException(
+        "Options 'oracle.serviceName' and 'oracle.sid' are mutually exclusive")
+    }
+
+    val (url, connectString) = urlOption match {
+      case Some(rawUrl) =>
+        rawUrl -> toConnectString(rawUrl)
+      case None =>
+        val host = hostOption.getOrElse {
+          throw new IllegalArgumentException(
+            "Missing required option. Provide 'oracle.url' (or 'url') or native host options " +
+              "'oracle.host' + 'oracle.port' + ('oracle.serviceName' or 'oracle.sid')")
+        }
+        val port = portOption
+          .map(parsePositiveInt(_, "oracle.port"))
+          .getOrElse {
+            throw new IllegalArgumentException("Missing required option 'oracle.port'")
+          }
+
+        if (serviceNameOption.isEmpty && sidOption.isEmpty) {
+          throw new IllegalArgumentException(
+            "One of 'oracle.serviceName' or 'oracle.sid' must be provided when using host/port options")
+        }
+
+        val connect = OciConnection.buildConnectString(host, port, serviceNameOption, sidOption)
+        val logical = serviceNameOption
+          .map(s => s"oci://$host:$port/service/$s")
+          .orElse(sidOption.map(s => s"oci://$host:$port/sid/$s"))
+          .get
+
+        logical -> connect
+    }
+
     val dbtable = optional("dbtable")
     val query = optional("query")
 
@@ -80,8 +131,8 @@ object Oracle11Options {
     }
 
     val fetchSize = optional("fetchsize") match {
-      case Some(value) =>
-        val parsed = parsePositiveInt(value, "fetchsize")
+      case Some(valueRaw) =>
+        val parsed = parsePositiveInt(valueRaw, "fetchsize")
         if (parsed <= 0) {
           throw new IllegalArgumentException(s"Option 'fetchsize' must be > 0, got $parsed")
         }
@@ -94,22 +145,28 @@ object Oracle11Options {
     val queryTimeoutSec = optional("querytimeoutsec").map(parsePositiveInt(_, "queryTimeoutSec"))
 
     val maxInListSize = optional("maxinlistsize") match {
-      case Some(value) => parsePositiveInt(value, "maxInListSize")
-      case None        => DefaultMaxInListSize
+      case Some(valueRaw) => parsePositiveInt(valueRaw, "maxInListSize")
+      case None           => DefaultMaxInListSize
     }
 
     val schemaCacheTtlSec = optional("schemacachettlsec") match {
-      case Some(value) => parseInt(value, "schemaCacheTtlSec")
-      case None        => DefaultSchemaCacheTtlSec
+      case Some(valueRaw) => parseInt(valueRaw, "schemaCacheTtlSec")
+      case None           => DefaultSchemaCacheTtlSec
     }
 
     val autoPartitionBounds = optional("autopartitionbounds")
       .map(parseBoolean(_, "autoPartitionBounds"))
       .getOrElse(false)
 
+    if (autoPartitionBounds) {
+      throw new IllegalArgumentException(
+        "Option 'autoPartitionBounds=true' is not supported in native OCI mode (v1). " +
+          "Use manual bounds: partitionColumn + lowerBound + upperBound + numPartitions")
+    }
+
     val autoPartitionMinRowsPerPartition = optional("autopartitionminrowsperpartition") match {
-      case Some(value) => parsePositiveLong(value, "autoPartitionMinRowsPerPartition")
-      case None        => DefaultAutoPartitionMinRowsPerPartition
+      case Some(valueRaw) => parsePositiveLong(valueRaw, "autoPartitionMinRowsPerPartition")
+      case None           => DefaultAutoPartitionMinRowsPerPartition
     }
 
     val partitionColumn = optional("partitioncolumn")
@@ -118,56 +175,29 @@ object Oracle11Options {
     val numPartitions = optional("numpartitions")
 
     val partitioning = {
-      if (autoPartitionBounds) {
-        val parsedPartitions = numPartitions
-          .map(parsePositiveInt(_, "numPartitions"))
-          .getOrElse {
-            throw new IllegalArgumentException(
-              "Option 'autoPartitionBounds=true' requires 'numPartitions'")
-          }
+      val items = Seq(partitionColumn, lowerBound, upperBound, numPartitions)
+      if (items.exists(_.isDefined) && !items.forall(_.isDefined)) {
+        throw new IllegalArgumentException(
+          "Options 'partitionColumn', 'lowerBound', 'upperBound', and 'numPartitions' must be provided together")
+      }
 
-        val column = partitionColumn.getOrElse {
-          throw new IllegalArgumentException(
-            "Option 'autoPartitionBounds=true' requires 'partitionColumn'")
-        }
-
-        if (lowerBound.isDefined || upperBound.isDefined) {
-          throw new IllegalArgumentException(
-            "Options 'lowerBound' and 'upperBound' must not be provided when 'autoPartitionBounds=true'")
-        }
-
+      if (items.forall(_.isDefined)) {
         Some(
           Oracle11PartitioningOptions(
-            partitionColumn = column,
-            numPartitions = parsedPartitions,
-            lowerBound = None,
-            upperBound = None,
-            autoBounds = true
+            partitionColumn = partitionColumn.get,
+            numPartitions = parsePositiveInt(numPartitions.get, "numPartitions"),
+            lowerBound = lowerBound,
+            upperBound = upperBound,
+            autoBounds = false
           ))
       } else {
-        val items = Seq(partitionColumn, lowerBound, upperBound, numPartitions)
-        if (items.exists(_.isDefined) && !items.forall(_.isDefined)) {
-          throw new IllegalArgumentException(
-            "Options 'partitionColumn', 'lowerBound', 'upperBound', and 'numPartitions' must be provided together")
-        }
-
-        if (items.forall(_.isDefined)) {
-          Some(
-            Oracle11PartitioningOptions(
-              partitionColumn = partitionColumn.get,
-              numPartitions = parsePositiveInt(numPartitions.get, "numPartitions"),
-              lowerBound = lowerBound,
-              upperBound = upperBound,
-              autoBounds = false
-            ))
-        } else {
-          None
-        }
+        None
       }
     }
 
     Oracle11Options(
       url = url,
+      connectString = connectString,
       user = user,
       password = password,
       dbtable = dbtable,
@@ -181,6 +211,28 @@ object Oracle11Options {
       autoPartitionMinRowsPerPartition = autoPartitionMinRowsPerPartition,
       partitioning = partitioning
     )
+  }
+
+  private def toConnectString(rawUrl: String): String = {
+    val trimmed = rawUrl.trim
+    val jdbcPrefix = "jdbc:oracle:thin:@"
+
+    if (!trimmed.toLowerCase(Locale.ROOT).startsWith(jdbcPrefix)) {
+      return trimmed
+    }
+
+    val tail = trimmed.substring(jdbcPrefix.length)
+    if (tail.startsWith("(") || tail.startsWith("//")) {
+      return tail
+    }
+
+    val hostPortSid = "^([^:]+):(\\d+):(.+)$".r
+    tail match {
+      case hostPortSid(host, port, sid) =>
+        OciConnection.buildConnectString(host, port.toInt, None, Some(sid))
+      case _ =>
+        tail
+    }
   }
 
   private def parseInt(value: String, name: String): Int = {

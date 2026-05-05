@@ -1,8 +1,6 @@
 package com.company.spark.oracle11
 
-import java.sql.{Connection, PreparedStatement, ResultSet}
-
-import scala.util.control.NonFatal
+import com.company.spark.oracle.oci.{OciConnection, OciResultReader, OciRow, OciStatement}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
@@ -18,13 +16,13 @@ final class Oracle11PartitionReader(
     extends PartitionReader[InternalRow] {
 
   private var initialized = false
-  private var connection: Connection = _
-  private var statement: PreparedStatement = _
-  private var resultSet: ResultSet = _
-  private var rowExtractor: ResultSet => InternalRow = _
+  private var connection: OciConnection = _
+  private var statement: OciStatement = _
+  private var resultReader: OciResultReader = _
+  private var rowExtractor: OciRow => InternalRow = _
   private var currentRow: InternalRow = _
 
-  // Reader lifecycle: open connection lazily on first `next`, then close all JDBC resources in `close`.
+  // Reader lifecycle: open connection lazily on first `next`, then close all OCI resources in `close`.
   private def initializeIfNeeded(): Unit = {
     if (initialized) {
       return
@@ -39,23 +37,11 @@ final class Oracle11PartitionReader(
     )
 
     try {
-      connection = Oracle11JdbcUtils.openConnection(options)
-      tuneConnection(connection)
-
-      statement = connection.prepareStatement(
-        builtQuery.sql,
-        ResultSet.TYPE_FORWARD_ONLY,
-        ResultSet.CONCUR_READ_ONLY
-      )
-      statement.setFetchSize(options.fetchSize)
-      safely {
-        statement.setFetchDirection(ResultSet.FETCH_FORWARD)
-      }
-      options.queryTimeoutSec.foreach(statement.setQueryTimeout)
-
-      Oracle11JdbcUtils.bindParameters(statement, builtQuery.params)
-      resultSet = statement.executeQuery()
-      rowExtractor = Oracle11JdbcUtils.buildReusableInternalRowExtractor(requiredSchema)
+      connection = Oracle11OciUtils.openConnection(options)
+      statement = connection.prepareStatement(builtQuery.sql)
+      Oracle11OciUtils.bindParameters(statement, builtQuery.params)
+      resultReader = statement.executeQuery()
+      rowExtractor = Oracle11OciUtils.buildReusableInternalRowExtractor(requiredSchema)
       initialized = true
     } catch {
       case t: Throwable =>
@@ -68,8 +54,8 @@ final class Oracle11PartitionReader(
 
   override def next(): Boolean = {
     initializeIfNeeded()
-    if (resultSet.next()) {
-      currentRow = rowExtractor(resultSet)
+    if (resultReader.hasNext) {
+      currentRow = rowExtractor(resultReader.next())
       true
     } else {
       currentRow = null
@@ -80,31 +66,14 @@ final class Oracle11PartitionReader(
   override def get(): InternalRow = currentRow
 
   override def close(): Unit = {
-    Oracle11JdbcUtils.closeQuietly(resultSet)
-    Oracle11JdbcUtils.closeQuietly(statement)
-    Oracle11JdbcUtils.closeQuietly(connection)
-    resultSet = null
+    Oracle11OciUtils.closeQuietly(resultReader)
+    Oracle11OciUtils.closeQuietly(statement)
+    Oracle11OciUtils.closeQuietly(connection)
+    resultReader = null
     statement = null
     connection = null
     rowExtractor = null
     currentRow = null
     initialized = false
-  }
-
-  private def tuneConnection(conn: Connection): Unit = {
-    safely {
-      conn.setReadOnly(true)
-    }
-    safely {
-      conn.setAutoCommit(false)
-    }
-  }
-
-  private def safely(operation: => Unit): Unit = {
-    try {
-      operation
-    } catch {
-      case NonFatal(_) =>
-    }
   }
 }

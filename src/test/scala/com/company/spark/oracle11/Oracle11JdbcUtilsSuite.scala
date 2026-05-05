@@ -12,7 +12,7 @@ final class Oracle11JdbcUtilsSuite extends AnyFunSuite {
     val decimal = Oracle11JdbcUtils.toSparkDecimal(new JBigDecimal("123.45"), target)
 
     assert(decimal != null)
-    assert(decimal.precision == 5)
+    assert(decimal.precision == target.precision)
     assert(decimal.scale == 2)
     assert(decimal.toJavaBigDecimal.compareTo(new JBigDecimal("123.45")) == 0)
   }

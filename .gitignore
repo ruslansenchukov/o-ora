@@ -12,3 +12,4 @@ spark-warehouse/
 .coursier/
 .sbt-boot/
 .sbt-global/
+.ivy2/

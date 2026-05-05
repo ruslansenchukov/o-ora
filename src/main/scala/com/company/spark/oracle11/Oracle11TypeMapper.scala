@@ -3,6 +3,8 @@ package com.company.spark.oracle11
 import java.sql.Types
 import java.util.Locale
 
+import com.company.spark.oracle.oci.OciDataType
+
 import org.apache.spark.sql.types._
 
 object Oracle11TypeMapper {
@@ -70,6 +72,40 @@ object Oracle11TypeMapper {
       } else {
         DoubleType
       }
+    }
+  }
+
+  def toSparkTypeFromOci(ociType: Int, precision: Int, scale: Int, dataSize: Int): DataType = {
+    ociType match {
+      case OciDataType.SQLT_NUM | OciDataType.SQLT_VNU =>
+        mapNumber(precision, scale)
+
+      case OciDataType.SQLT_INT =>
+        if (precision >= 1 && precision <= 9) IntegerType else LongType
+
+      case OciDataType.SQLT_FLT | OciDataType.SQLT_BFLOAT | OciDataType.SQLT_BDOUBLE |
+          OciDataType.SQLT_IBFLOAT | OciDataType.SQLT_IBDOUBLE =>
+        DoubleType
+
+      case OciDataType.SQLT_CHR | OciDataType.SQLT_STR | OciDataType.SQLT_VCS |
+          OciDataType.SQLT_AFC | OciDataType.SQLT_AVC | OciDataType.SQLT_LNG |
+          OciDataType.SQLT_RDD =>
+        StringType
+
+      case OciDataType.SQLT_DAT | OciDataType.SQLT_TIMESTAMP | OciDataType.SQLT_TIMESTAMP_TZ |
+          OciDataType.SQLT_TIMESTAMP_LTZ =>
+        TimestampType
+
+      case OciDataType.SQLT_CLOB =>
+        StringType
+
+      case OciDataType.SQLT_BIN | OciDataType.SQLT_LBI | OciDataType.SQLT_BLOB =>
+        throw new IllegalArgumentException(
+          s"Unsupported Oracle type in native OCI mode: ociType=$ociType (RAW/BLOB). " +
+            s"Column dataSize=$dataSize")
+
+      case _ =>
+        StringType
     }
   }
 }

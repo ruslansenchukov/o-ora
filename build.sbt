@@ -8,7 +8,7 @@ ThisBuild / scalaVersion := "2.12.19"
 val sparkVersion = "3.5.2"
 val scalaTestVersion = "3.2.19"
 val testcontainersVersion = "1.20.4"
-val ojdbcVersion = "19.22.0.0"
+val jnaVersion = "5.14.0"
 val propagatedIntegrationProps = Seq("oracle11.it.enabled", "oracle11.it.image").flatMap { key =>
   sys.props.get(key).map(value => s"-D$key=$value")
 }
@@ -53,7 +53,8 @@ lazy val root = (project in file("."))
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-encoding", "UTF-8"),
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-sql" % sparkVersion % Provided,
-      "com.oracle.database.jdbc" % "ojdbc8" % ojdbcVersion,
+      "net.java.dev.jna" % "jna" % jnaVersion,
+      "net.java.dev.jna" % "jna-platform" % jnaVersion,
       "org.scalatest" %% "scalatest" % scalaTestVersion % Test,
       "org.scalatest" %% "scalatest" % scalaTestVersion % IntegrationTest,
       "org.testcontainers" % "testcontainers" % testcontainersVersion % IntegrationTest,

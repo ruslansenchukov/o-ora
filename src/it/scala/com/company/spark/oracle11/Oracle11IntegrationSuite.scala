@@ -12,13 +12,16 @@ final class Oracle11IntegrationSuite extends AnyFunSuite with BeforeAndAfterAll 
   private var spark: SparkSession = _
   private var target: Oracle11IntegrationTarget = _
   private val tableName = "ORA11_CONNECTOR_IT"
+  private val legacyJdbcEnabled = sys.props.get("oracle11.jdbc.it.enabled").exists(_.toBoolean)
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
-    spark = SparkSession.builder().appName("oracle11-it").master("local[2]").getOrCreate()
-    target = Oracle11IntegrationHarness.resolve().orNull
-    if (target != null) {
-      Oracle11IntegrationHarness.initializeTable(target, tableName)
+    if (legacyJdbcEnabled) {
+      spark = SparkSession.builder().appName("oracle11-it").master("local[2]").getOrCreate()
+      target = Oracle11IntegrationHarness.resolve().orNull
+      if (target != null) {
+        Oracle11IntegrationHarness.initializeTable(target, tableName)
+      }
     }
   }
 
@@ -33,6 +36,12 @@ final class Oracle11IntegrationSuite extends AnyFunSuite with BeforeAndAfterAll 
   }
 
   private def requireTarget(): Oracle11IntegrationTarget = {
+    if (!legacyJdbcEnabled) {
+      cancel(
+        "Legacy JDBC-oriented IT suite is disabled by default. " +
+          "Enable with -Doracle11.jdbc.it.enabled=true only when JDBC test dependencies are available.")
+    }
+
     if (target == null) {
       cancel(
         "Integration target is not configured. Use -Doracle11.it.enabled=true and optionally " +

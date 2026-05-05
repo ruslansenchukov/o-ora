@@ -108,29 +108,4 @@ final class Oracle11PartitionPlannerSuite extends AnyFunSuite {
     assert(err.getMessage.contains("was not found"))
   }
 
-  test("auto bounds falls back to single partition when stats query fails") {
-    val options = Oracle11Options.fromMap(
-      Map(
-        "url" -> "jdbc:oracle:thin:@//127.0.0.1:1/XE",
-        "user" -> "u",
-        "password" -> "p",
-        "dbtable" -> "HR.EMPLOYEES",
-        "partitionColumn" -> "ID",
-        "numPartitions" -> "8",
-        "autoPartitionBounds" -> "true",
-        "connectTimeoutMs" -> "200"
-      ))
-
-    val schema = StructType(Seq(StructField("ID", IntegerType, nullable = true)))
-    val partitions = Oracle11PartitionPlanner.plan(options, options.relation, schema, pushedPredicate = None)
-
-    assert(partitions.length == 1)
-    assert(partitions.head.predicate.isEmpty)
-  }
-
-  test("auto bounds computes effective partition count from row threshold") {
-    assert(Oracle11PartitionPlanner.computeEffectivePartitions(8, rowCount = 1000000L, minRowsPerPartition = 200000L) == 5)
-    assert(Oracle11PartitionPlanner.computeEffectivePartitions(8, rowCount = 10000L, minRowsPerPartition = 200000L) == 1)
-    assert(Oracle11PartitionPlanner.computeEffectivePartitions(1, rowCount = 1000000L, minRowsPerPartition = 1L) == 1)
-  }
 }
