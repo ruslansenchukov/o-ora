@@ -177,3 +177,35 @@ Output includes:
 - `RAW/BLOB` are currently explicit unsupported in native schema mapping path
 - Legacy JDBC utilities remain in codebase for shared helper logic and backward compatibility tests, but native connector execution path does not use JDBC transport
 
+
+## Benchmark Results
+
+```bash
+native: rows=630000, runs=5, run_order=alternate
+jdbc: rows=630000, runs=5, run_order=alternate
+
+native
+  rows: 630000
+  runs: 5
+  avg_sec: 27.9179
+  min_sec: 23.8643
+  max_sec: 30.0191
+  p50_sec: 29.5254
+  p95_sec: 30.0191
+  rows_per_sec: 22566.19
+
+jdbc
+  rows: 630000
+  runs: 5
+  avg_sec: 52.0226
+  min_sec: 49.0233
+  max_sec: 53.2957
+  p50_sec: 52.9057
+  p95_sec: 53.2957
+  rows_per_sec: 12110.13
+
+Delta (native vs jdbc)
+  avg_sec improvement: 46.34%
+  rows_per_sec improvement: 86.34%
+  speedup native_vs_jdbc: 1.863x
+```
